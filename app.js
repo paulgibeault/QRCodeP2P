@@ -192,9 +192,9 @@ btnHost.addEventListener('click', async () => {
         sdp: peerConnection.localDescription.sdp
             .split('\r\n')
             .filter(line => {
-                // Remove non-essential candidate lines (e.g. mDNS and TCP)
+                // Remove non-essential candidate lines (e.g. TCP)
                 if (line.startsWith('a=candidate:')) {
-                    return line.includes(' udp ') && !line.includes('.local');
+                    return line.includes(' udp ');
                 }
                 // Keep all other lines
                 return true;
@@ -246,9 +246,9 @@ btnJoin.addEventListener('click', () => {
             sdp: peerConnection.localDescription.sdp
                 .split('\r\n')
                 .filter(line => {
-                    // Remove non-essential candidate lines (e.g. mDNS and TCP)
+                    // Remove non-essential candidate lines (e.g. TCP)
                     if (line.startsWith('a=candidate:')) {
-                        return line.includes(' udp ') && !line.includes('.local');
+                        return line.includes(' udp ');
                     }
                     // Keep all other lines
                     return true;
