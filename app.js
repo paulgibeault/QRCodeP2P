@@ -80,13 +80,22 @@ async function waitForIceGathering() {
         if (peerConnection.iceGatheringState === 'complete') {
             resolve();
         } else {
+            let timeout;
             const checkState = () => {
                 if (peerConnection.iceGatheringState === 'complete') {
                     peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                    clearTimeout(timeout);
                     resolve();
                 }
             };
             peerConnection.addEventListener('icegatheringstatechange', checkState);
+            
+            // Timeout after 2 seconds to avoid laptops hanging on virtual interfaces
+            timeout = setTimeout(() => {
+                peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                logMessage('ICE gathering timed out, proceeding with current candidates.', 'system');
+                resolve();
+            }, 2000);
         }
     });
 }
@@ -124,9 +133,10 @@ function startScanner(onSuccess) {
         try { html5QrcodeScanner.clear(); } catch(e){}
     }
     
+    // Removed qrbox to scan the full video frame, which helps fixed-focus laptop webcams
     html5QrcodeScanner = new Html5QrcodeScanner(
       "reader",
-      { fps: 10, qrbox: {width: 250, height: 250} },
+      { fps: 10 },
       /* verbose= */ false);
       
     html5QrcodeScanner.render((decodedText, decodedResult) => {
