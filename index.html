@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>P2P QR Code Signaling</title>
+    <!-- QR Code Generator -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <!-- QR Code Scanner -->
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <!-- Compression for SDP -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>QR-Code P2P Connect</h1>
+            <p>Establish a WebRTC connection with no signaling server!</p>
+            <div id="connection-status" class="status-disconnected">Disconnected</div>
+        </header>
+
+        <main>
+            <div class="panels">
+                <div class="panel actions">
+                    <h2>Connection Setup</h2>
+                    <p>Determine who will host and who will join.</p>
+                    <div class="button-group">
+                        <button id="btn-host" class="btn primary">1. Host Session (Create Offer)</button>
+                        <button id="btn-join" class="btn primary">2. Join Session (Scan Offer)</button>
+                    </div>
+                    <div class="button-group" style="margin-top: 20px;">
+                        <button id="btn-scan-answer" class="btn secondary" style="display:none;">3. Host: Scan Answer</button>
+                    </div>
+                </div>
+
+                <div class="panel qr-section">
+                    <h2>QR Area</h2>
+                    <div id="qr-container" style="display: none;">
+                        <p id="qr-instructions"></p>
+                        <div id="qr-canvas"></div>
+                        <br>
+                        <button id="btn-copy-sdp" class="btn text-btn">Copy Raw Data</button>
+                    </div>
+                    <div id="scanner-container" style="display: none;">
+                        <div id="reader"></div>
+                        <div style="margin-top: 20px;" class="paste-section">
+                            <p style="margin-bottom: 5px;">Or paste code here:</p>
+                            <div class="input-group">
+                                <input type="text" id="paste-input" placeholder="Paste raw data...">
+                                <button id="btn-submit-paste" class="btn secondary">Submit</button>
+                            </div>
+                        </div>
+                        <button id="btn-cancel-scan" class="btn danger" style="margin-top: 10px;">Cancel Scan</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel chat-section">
+                <h2>Test Bed Console</h2>
+                <div id="messages" class="messages-box"></div>
+                <div class="input-group">
+                    <input type="text" id="chat-input" placeholder="Type a message..." disabled>
+                    <button id="btn-send" class="btn" disabled>Send</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>
