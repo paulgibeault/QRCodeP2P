@@ -1,3 +1,5 @@
+const APP_VERSION = "v1.0.1";
+
 const STUN_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }
@@ -23,6 +25,9 @@ const statusBadge = document.getElementById('connection-status');
 const readerDiv = document.getElementById('reader');
 const pasteInput = document.getElementById('paste-input');
 const btnSubmitPaste = document.getElementById('btn-submit-paste');
+const appVersionDisplay = document.getElementById('app-version');
+
+if (appVersionDisplay) appVersionDisplay.textContent = APP_VERSION;
 
 let rawSDPPayload = ""; // used for copying
 let currentScanSuccessCallback = null;
@@ -181,7 +186,23 @@ btnHost.addEventListener('click', async () => {
     logMessage('Gathering ICE candidates... please wait.');
     await waitForIceGathering();
     
-    const offerPayload = JSON.stringify(peerConnection.localDescription);
+    // Optimize SDP to reduce QR size
+    const optDesc = {
+        type: peerConnection.localDescription.type,
+        sdp: peerConnection.localDescription.sdp
+            .split('\r\n')
+            .filter(line => {
+                // Remove non-essential candidate lines (e.g. mDNS and TCP)
+                if (line.startsWith('a=candidate:')) {
+                    return line.includes(' udp ') && !line.includes('.local');
+                }
+                // Keep all other lines
+                return true;
+            })
+            .join('\r\n')
+    };
+    
+    const offerPayload = JSON.stringify(optDesc);
     generateQRCode(offerPayload, "Step 1: Have the JOINER scan this QR code.");
     
     btnHost.style.display = 'none';
@@ -219,7 +240,23 @@ btnJoin.addEventListener('click', () => {
         logMessage('Gathering ICE candidates... please wait.');
         await waitForIceGathering();
         
-        const answerPayload = JSON.stringify(peerConnection.localDescription);
+        // Optimize SDP to reduce QR size
+        const optDesc = {
+            type: peerConnection.localDescription.type,
+            sdp: peerConnection.localDescription.sdp
+                .split('\r\n')
+                .filter(line => {
+                    // Remove non-essential candidate lines (e.g. mDNS and TCP)
+                    if (line.startsWith('a=candidate:')) {
+                        return line.includes(' udp ') && !line.includes('.local');
+                    }
+                    // Keep all other lines
+                    return true;
+                })
+                .join('\r\n')
+        };
+        
+        const answerPayload = JSON.stringify(optDesc);
         generateQRCode(answerPayload, "Step 2: Have the HOST scan this QR code.");
     });
 });
