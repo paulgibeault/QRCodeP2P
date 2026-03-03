@@ -25,7 +25,7 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2>Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.2.0</span></h2>
+                    <h2>Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.3.0</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
@@ -34,6 +34,7 @@ export class P2PUIManager {
                     <div class="p2p-panel">
                         <h3 style="margin-top:0">1. Host Session</h3>
                         <button id="p2p-btn-host" class="p2p-btn p2p-btn-primary">Host (Create Offer)</button>
+                        <button id="p2p-btn-add-player" class="p2p-btn p2p-btn-primary" style="display:none;">Add Another Player</button>
                         <button id="p2p-btn-scan-ans" class="p2p-btn p2p-btn-secondary" style="display:none;">Scan Answer</button>
                     </div>
                     <div class="p2p-panel">
@@ -82,6 +83,7 @@ export class P2PUIManager {
             overlay: document.getElementById('p2p-modal-overlay'),
             btnClose: document.getElementById('p2p-btn-close'),
             btnHost: document.getElementById('p2p-btn-host'),
+            btnAddPlayer: document.getElementById('p2p-btn-add-player'),
             btnJoin: document.getElementById('p2p-btn-join'),
             btnScanAns: document.getElementById('p2p-btn-scan-ans'),
             statusBadge: document.getElementById('p2p-status-badge'),
@@ -112,17 +114,40 @@ export class P2PUIManager {
         this.peerNode.addEventListener('diagnostic', (e) => this.logDiag(e.detail.type, e.detail.msg));
         
         this.peerNode.addEventListener('status', (e) => {
-            const status = e.detail;
-            this.ui.statusBadge.textContent = status.toUpperCase();
-            this.ui.statusBadge.className = '';
-            if (status === 'connected') {
-                this.ui.statusBadge.classList.add('p2p-status-connected');
-                this.cleanupUI();
-                // Auto hide modal after brief delay when connected?
-                setTimeout(() => this.hide(), 1500);
+            const { peerId, status } = e.detail;
+            
+            // If we are host, update status but don't auto-hide immediately
+            if (this.peerNode.isHost) {
+                let connectedCount = 0;
+                this.peerNode.peers.forEach(p => { if (p.status === 'connected') connectedCount++; });
+                
+                if (connectedCount > 0) {
+                    this.ui.statusBadge.textContent = `HOSTING (${connectedCount} PEERS)`;
+                    this.ui.statusBadge.className = 'p2p-status-connected';
+                    this.cleanupUI();
+                    
+                    this.ui.btnHost.style.display = 'none';
+                    this.ui.btnJoin.style.display = 'none';
+                    this.ui.btnScanAns.style.display = 'none';
+                    this.ui.btnAddPlayer.style.display = 'inline-block';
+                } else if (status === 'disconnected') {
+                    this.ui.statusBadge.textContent = 'DISCONNECTED';
+                    this.ui.statusBadge.className = 'p2p-status-disconnected';
+                } else {
+                    this.ui.statusBadge.textContent = 'CONNECTING...';
+                    this.ui.statusBadge.className = 'p2p-status-connecting';
+                }
+            } else {
+                this.ui.statusBadge.textContent = status.toUpperCase();
+                this.ui.statusBadge.className = '';
+                if (status === 'connected') {
+                    this.ui.statusBadge.classList.add('p2p-status-connected');
+                    this.cleanupUI();
+                    setTimeout(() => this.hide(), 1500);
+                }
+                else if (status === 'disconnected') this.ui.statusBadge.classList.add('p2p-status-disconnected');
+                else this.ui.statusBadge.classList.add('p2p-status-connecting');
             }
-            else if (status === 'disconnected') this.ui.statusBadge.classList.add('p2p-status-disconnected');
-            else this.ui.statusBadge.classList.add('p2p-status-connecting');
         });
 
         this.ui.btnHost.addEventListener('click', async () => {
@@ -136,6 +161,19 @@ export class P2PUIManager {
                 this.displayQRCode(offerData, "Step 1: Have JOINER scan this.");
             } catch (e) {
                 this.logDiag('error', 'Critical failure generating Host Offer.');
+            }
+        });
+
+        this.ui.btnAddPlayer.addEventListener('click', async () => {
+            this.logDiag('info', '--- ADDING MULTIPLAYER ---');
+            this.ui.btnAddPlayer.style.display = 'none';
+            this.ui.btnScanAns.style.display = 'block';
+            
+            try {
+                const offerData = await this.peerNode.createOffer();
+                this.displayQRCode(offerData, "Step 1: Have NEW JOINER scan this.");
+            } catch (e) {
+                this.logDiag('error', 'Critical failure generating Additional Offer.');
             }
         });
 
@@ -165,10 +203,24 @@ export class P2PUIManager {
 
         this.ui.btnCancelScan.addEventListener('click', () => {
             this.cleanupUI();
-            this.ui.btnHost.style.display = 'block';
-            this.ui.btnJoin.style.display = 'block';
-            this.ui.btnScanAns.style.display = 'none';
-            if(this.peerNode.peerConnection) this.peerNode.peerConnection.close();
+            
+            if (this.peerNode.isHost && Array.from(this.peerNode.peers.values()).some(p => p.status === 'connected')) {
+                this.ui.btnAddPlayer.style.display = 'inline-block';
+                this.ui.btnScanAns.style.display = 'none';
+            } else {
+                this.ui.btnHost.style.display = 'inline-block';
+                this.ui.btnJoin.style.display = 'inline-block';
+                this.ui.btnScanAns.style.display = 'none';
+                if (this.ui.btnAddPlayer) this.ui.btnAddPlayer.style.display = 'none';
+            }
+            
+            // Close any pending connections
+            this.peerNode.peers.forEach((p, id) => {
+                if (p.status !== 'connected') {
+                    p.connection.close();
+                    this.peerNode.peers.delete(id);
+                }
+            });
         });
 
         this.ui.btnCopySdp.addEventListener('click', async () => {

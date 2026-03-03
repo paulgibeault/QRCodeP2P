@@ -35,81 +35,135 @@ export class ConnectionUtils {
 export class PeerManager extends EventTarget {
     constructor() {
         super();
-        this.peerConnection = null;
-        this.dataChannel = null;
-        this.candidates = [];
+        this.peers = new Map();
+        this.isHost = false;
+        this.myId = this.generateId();
     }
 
-    init() {
-        if(this.peerConnection) {
-            this.peerConnection.onicecandidate = null;
-            this.peerConnection.close();
+    generateId() {
+        return Math.random().toString(36).substring(2, 9);
+    }
+
+    initPeer(peerId, type) {
+        if(this.peers.has(peerId)) {
+            const existing = this.peers.get(peerId);
+            existing.connection.onicecandidate = null;
+            existing.connection.close();
+            this.peers.delete(peerId);
         }
         
-        this.peerConnection = new RTCPeerConnection(STUN_SERVERS);
+        const peerConnection = new RTCPeerConnection(STUN_SERVERS);
+        const peerData = {
+            connection: peerConnection,
+            dataChannel: null,
+            status: 'new',
+            type: type
+        };
+        this.peers.set(peerId, peerData);
         
-        this.peerConnection.oniceconnectionstatechange = () => {
-            this.dispatchEvent(new CustomEvent('status', { detail: this.peerConnection.iceConnectionState }));
+        peerConnection.oniceconnectionstatechange = () => {
+            peerData.status = peerConnection.iceConnectionState;
+            this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: peerData.status } }));
         };
 
-        // NEW: ICE Candidate Tracking
-        this.peerConnection.onicecandidate = (event) => {
+        peerConnection.onicecandidate = (event) => {
             if (event.candidate) {
-                // Parse candidate string to find type (host, srflx, relay)
                 const cstr = event.candidate.candidate;
                 let typeMatch = cstr.match(/typ (\w+)/);
                 let candType = typeMatch ? typeMatch[1] : 'unknown';
-                
                 let outStr = `[${candType.toUpperCase()}] ${event.candidate.address}:${event.candidate.port}`;
                 this.dispatchEvent(new CustomEvent('diagnostic', {
-                    detail: { type: 'ice', msg: outStr }
+                    detail: { type: 'ice', msg: `[Peer ${peerId}] ${outStr}` }
                 }));
             } else {
                 this.dispatchEvent(new CustomEvent('diagnostic', {
-                    detail: { type: 'sys', msg: 'ICE Gathering Complete.' }
+                    detail: { type: 'sys', msg: `ICE Gathering Complete for ${peerId}.` }
                 }));
             }
         };
 
-        this.peerConnection.ondatachannel = (event) => {
-            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: 'Data channel inbound from remote.' }}));
-            this.setupDataChannel(event.channel);
+        peerConnection.ondatachannel = (event) => {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Data channel inbound from ${peerId}.` }}));
+            this.setupDataChannel(peerId, event.channel);
+        };
+
+        return peerData;
+    }
+
+    setupDataChannel(peerId, channel) {
+        const peerData = this.peers.get(peerId);
+        if(!peerData) return;
+        
+        peerData.dataChannel = channel;
+        peerData.dataChannel.onopen = () => {
+            this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: true } }));
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: `Data channel OPEN with ${peerId}!` }}));
+        };
+        peerData.dataChannel.onclose = () => {
+            this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: false } }));
+            this.peers.delete(peerId);
+        };
+        peerData.dataChannel.onmessage = (event) => {
+            let data = event.data;
+            let parsed = null;
+            
+            try {
+                parsed = JSON.parse(data);
+            } catch(e) {
+                parsed = { text: data, from: peerId }; // legacy string fallback
+            }
+
+            // Host relays messages
+            if (this.isHost && parsed.from !== this.myId) {
+                this.broadcast(data, peerId);
+            }
+
+            this.dispatchEvent(new CustomEvent('message', { 
+                detail: Object.assign({}, parsed, { incoming: true, peerId }) 
+            }));
         };
     }
 
-    setupDataChannel(channel) {
-        this.dataChannel = channel;
-        this.dataChannel.onopen = () => {
-            this.dispatchEvent(new CustomEvent('chatState', { detail: true }));
-            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: 'Data channel OPEN!' }}));
-        };
-        this.dataChannel.onclose = () => {
-            this.dispatchEvent(new CustomEvent('chatState', { detail: false }));
-        };
-        this.dataChannel.onmessage = (event) => {
-            this.dispatchEvent(new CustomEvent('message', { detail: { text: event.data, incoming: true }}));
-        };
+    broadcast(message, excludePeerId = null) {
+        let sent = false;
+        const msgStr = typeof message === 'string' ? message : JSON.stringify(message);
+
+        this.peers.forEach((peerData, pId) => {
+            if (pId !== excludePeerId && peerData.dataChannel && peerData.dataChannel.readyState === 'open') {
+                peerData.dataChannel.send(msgStr);
+                sent = true;
+            }
+        });
+        
+        return sent;
     }
 
-    send(message) {
-        if(this.dataChannel && this.dataChannel.readyState === 'open') {
-            this.dataChannel.send(message);
-            this.dispatchEvent(new CustomEvent('message', { detail: { text: message, incoming: false }}));
+    send(text) {
+        const payload = { text, from: this.myId };
+        const sent = this.broadcast(payload);
+        
+        if (sent) {
+            this.dispatchEvent(new CustomEvent('message', { detail: { text, from: this.myId, incoming: false }}));
         } else {
-            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: 'Cannot send, channel not open.' }}));
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: 'Cannot send, no channels open.' }}));
         }
     }
 
     async createOffer() {
-        this.init();
-        this.setupDataChannel(this.peerConnection.createDataChannel('data'));
+        this.isHost = true;
+        const peerId = this.generateId();
+        const peerData = this.initPeer(peerId, 'client');
+        this.setupDataChannel(peerId, peerData.connection.createDataChannel('data'));
         
         try {
-            const offer = await this.peerConnection.createOffer();
-            await this.peerConnection.setLocalDescription(offer);
-            await this.waitForIceGathering();
+            const offer = await peerData.connection.createOffer();
+            await peerData.connection.setLocalDescription(offer);
+            await this.waitForIceGathering(peerId);
             
-            return JSON.stringify(this.peerConnection.localDescription);
+            return JSON.stringify({
+                peerId: peerId,
+                sessionDesc: peerData.connection.localDescription
+            });
         } catch (e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Offer creation failed: ${e.message}` }}));
             throw e;
@@ -117,14 +171,20 @@ export class PeerManager extends EventTarget {
     }
 
     async createAnswer(offerPayload) {
-        this.init();
+        this.isHost = false;
+        const hostPeerId = offerPayload.peerId; 
+        const peerData = this.initPeer(hostPeerId, 'host');
+        
         try {
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerPayload));
-            const answer = await this.peerConnection.createAnswer();
-            await this.peerConnection.setLocalDescription(answer);
-            await this.waitForIceGathering();
+            await peerData.connection.setRemoteDescription(new RTCSessionDescription(offerPayload.sessionDesc));
+            const answer = await peerData.connection.createAnswer();
+            await peerData.connection.setLocalDescription(answer);
+            await this.waitForIceGathering(hostPeerId);
             
-            return JSON.stringify(this.peerConnection.localDescription);
+            return JSON.stringify({
+                peerId: hostPeerId,
+                sessionDesc: peerData.connection.localDescription
+            });
         } catch(e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Answer creation failed: ${e.message}` }}));
             throw e;
@@ -132,33 +192,44 @@ export class PeerManager extends EventTarget {
     }
 
     async acceptAnswer(answerPayload) {
+        const peerId = answerPayload.peerId;
+        const peerData = this.peers.get(peerId);
+        
+        if (!peerData) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Peer ${peerId} not found to accept answer.` }}));
+            return;
+        }
+
         try {
-            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answerPayload));
-            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Answer accepted` }}));
+            await peerData.connection.setRemoteDescription(new RTCSessionDescription(answerPayload.sessionDesc));
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Answer accepted from ${peerId}` }}));
         } catch(e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Accepting answer failed: ${e.message}` }}));
         }
     }
 
-    async waitForIceGathering() {
+    async waitForIceGathering(peerId) {
+        const peerData = this.peers.get(peerId);
+        if (!peerData) return;
+
         return new Promise((resolve) => {
-            if (this.peerConnection.iceGatheringState === 'complete') {
+            if (peerData.connection.iceGatheringState === 'complete') {
                 resolve();
             } else {
                 let timeout;
                 const checkState = () => {
-                    if (this.peerConnection.iceGatheringState === 'complete') {
-                        this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                    if (peerData.connection.iceGatheringState === 'complete') {
+                        peerData.connection.removeEventListener('icegatheringstatechange', checkState);
                         clearTimeout(timeout);
                         resolve();
                     }
                 };
-                this.peerConnection.addEventListener('icegatheringstatechange', checkState);
+                peerData.connection.addEventListener('icegatheringstatechange', checkState);
                 
                 // 10 second timeout
                 timeout = setTimeout(() => {
-                    this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'warn', msg: 'ICE Gathering Timeout (10s) reached. Proceeding with collected candidates.' }}));
+                    peerData.connection.removeEventListener('icegatheringstatechange', checkState);
+                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'warn', msg: `ICE Gathering Timeout for ${peerId}. Proceeding.` }}));
                     resolve();
                 }, 10000);
             }
