@@ -159,9 +159,9 @@ class PeerManager extends EventTarget {
                 // 2.5 second timeout
                 timeout = setTimeout(() => {
                     this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'warn', msg: 'ICE Gathering Timeout (2.5s) reached. Proceeding with collected candidates.' }}));
+                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'warn', msg: 'ICE Gathering Timeout (10s) reached. Proceeding with collected candidates.' }}));
                     resolve();
-                }, 2500);
+                }, 10000);
             }
         });
     }
