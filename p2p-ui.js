@@ -25,7 +25,7 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2>Multiplayer Connection</h2>
+                    <h2>Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.2.0</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
@@ -205,7 +205,7 @@ export class P2PUIManager {
         
         this.logDiag('info', 'Compressing SDP payload...');
         this.rawSDPPayload = await ConnectionUtils.compressData(dataStr);
-        this.logDiag('success', \`Payload compressed to \${this.rawSDPPayload.length} chars\`);
+        this.logDiag('success', `Payload compressed to ${this.rawSDPPayload.length} chars`);
         
         try {
             this.ui.qrCanvas.innerHTML = '';
@@ -216,7 +216,7 @@ export class P2PUIManager {
                 correctLevel: QRCode.CorrectLevel.L
             });
         } catch(e) {
-            this.logDiag('error', \`QR Canvas err: \${e.message}\`);
+            this.logDiag('error', `QR Canvas err: ${e.message}`);
         }
     }
 
@@ -244,7 +244,7 @@ export class P2PUIManager {
                 const data = JSON.parse(decompressed);
                 onSuccess(data);
             } catch (e) {
-                this.logDiag('error', \`Failed Data Decompression: \${e.message}\`);
+                this.logDiag('error', `Failed Data Decompression: ${e.message}`);
                 alert("Failed to decode connection data. Check diagnostics panel.");
                 this.cleanupUI();
                 this.startScanner(onSuccess);
@@ -253,7 +253,7 @@ export class P2PUIManager {
             if(err && !err.includes("NotFoundException")) {
                 failureCount++;
                 if(failureCount % 5 === 0) {
-                    this.logDiag('warn', \`Scanner active, parsing frame... (Failed decoding x\${failureCount})\`);
+                    this.logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
                 }
             }
         });

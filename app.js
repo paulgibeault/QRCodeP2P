@@ -1,4 +1,4 @@
-const APP_VERSION = "v1.1.0 (Refactored)";
+const APP_VERSION = "v1.2.0 (Addon Package)";
 
 const STUN_SERVERS = {
     iceServers: [
