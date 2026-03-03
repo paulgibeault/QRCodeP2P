@@ -1,297 +1,443 @@
-const APP_VERSION = "v1.0.2";
+const APP_VERSION = "v1.1.0 (Refactored)";
 
 const STUN_SERVERS = {
     iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' }
+        { urls: 'stun:stun.l.google.com:19302' },
+        // for reliability, we normally would add a turn server here
+        // { urls: 'turn:YOUR_TURN_SERVER', username: 'u', credential: 'c' }
     ]
 };
 
-let peerConnection;
-let dataChannel;
+// ==========================================
+// UTILS: Compression & QR
+// ==========================================
+class ConnectionUtils {
+    static async compressData(dataStr) {
+        const stream = new Blob([dataStr], {type: 'application/json'}).stream().pipeThrough(new CompressionStream('deflate-raw'));
+        const blob = await new Response(stream).blob();
+        const buffer = await blob.arrayBuffer();
+        return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+    }
+
+    static async decompressData(b64Str) {
+        try {
+            const bytes = Uint8Array.from(atob(b64Str), c => c.charCodeAt(0));
+            const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+            const blob = await new Response(stream).blob();
+            return await blob.text();
+        } catch (e) {
+            throw new Error(`Decompression failed: ${e.message}`);
+        }
+    }
+}
+
+// ==========================================
+// CORE: WebRTC Manager
+// ==========================================
+class PeerManager extends EventTarget {
+    constructor() {
+        super();
+        this.peerConnection = null;
+        this.dataChannel = null;
+        this.candidates = [];
+    }
+
+    init() {
+        if(this.peerConnection) {
+            this.peerConnection.onicecandidate = null;
+            this.peerConnection.close();
+        }
+        
+        this.peerConnection = new RTCPeerConnection(STUN_SERVERS);
+        
+        this.peerConnection.oniceconnectionstatechange = () => {
+            this.dispatchEvent(new CustomEvent('status', { detail: this.peerConnection.iceConnectionState }));
+        };
+
+        // NEW: ICE Candidate Tracking
+        this.peerConnection.onicecandidate = (event) => {
+            if (event.candidate) {
+                // Parse candidate string to find type (host, srflx, relay)
+                const cstr = event.candidate.candidate;
+                let typeMatch = cstr.match(/typ (\w+)/);
+                let candType = typeMatch ? typeMatch[1] : 'unknown';
+                
+                let outStr = `[${candType.toUpperCase()}] ${event.candidate.address}:${event.candidate.port}`;
+                this.dispatchEvent(new CustomEvent('diagnostic', {
+                    detail: { type: 'ice', msg: outStr }
+                }));
+            } else {
+                this.dispatchEvent(new CustomEvent('diagnostic', {
+                    detail: { type: 'sys', msg: 'ICE Gathering Complete.' }
+                }));
+            }
+        };
+
+        this.peerConnection.ondatachannel = (event) => {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: 'Data channel inbound from remote.' }}));
+            this.setupDataChannel(event.channel);
+        };
+    }
+
+    setupDataChannel(channel) {
+        this.dataChannel = channel;
+        this.dataChannel.onopen = () => {
+            this.dispatchEvent(new CustomEvent('chatState', { detail: true }));
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: 'Data channel OPEN!' }}));
+        };
+        this.dataChannel.onclose = () => {
+            this.dispatchEvent(new CustomEvent('chatState', { detail: false }));
+        };
+        this.dataChannel.onmessage = (event) => {
+            this.dispatchEvent(new CustomEvent('message', { detail: { text: event.data, incoming: true }}));
+        };
+    }
+
+    send(message) {
+        if(this.dataChannel && this.dataChannel.readyState === 'open') {
+            this.dataChannel.send(message);
+            this.dispatchEvent(new CustomEvent('message', { detail: { text: message, incoming: false }}));
+        } else {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: 'Cannot send, channel not open.' }}));
+        }
+    }
+
+    async createOffer() {
+        this.init();
+        this.setupDataChannel(this.peerConnection.createDataChannel('chat'));
+        
+        try {
+            const offer = await this.peerConnection.createOffer();
+            await this.peerConnection.setLocalDescription(offer);
+            await this.waitForIceGathering();
+            
+            return JSON.stringify(this.peerConnection.localDescription);
+        } catch (e) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Offer creation failed: ${e.message}` }}));
+            throw e;
+        }
+    }
+
+    async createAnswer(offerPayload) {
+        this.init();
+        try {
+            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(offerPayload));
+            const answer = await this.peerConnection.createAnswer();
+            await this.peerConnection.setLocalDescription(answer);
+            await this.waitForIceGathering();
+            
+            return JSON.stringify(this.peerConnection.localDescription);
+        } catch(e) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Answer creation failed: ${e.message}` }}));
+            throw e;
+        }
+    }
+
+    async acceptAnswer(answerPayload) {
+        try {
+            await this.peerConnection.setRemoteDescription(new RTCSessionDescription(answerPayload));
+        } catch(e) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Accepting answer failed: ${e.message}` }}));
+        }
+    }
+
+    async waitForIceGathering() {
+        return new Promise((resolve) => {
+            if (this.peerConnection.iceGatheringState === 'complete') {
+                resolve();
+            } else {
+                let timeout;
+                const checkState = () => {
+                    if (this.peerConnection.iceGatheringState === 'complete') {
+                        this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                        clearTimeout(timeout);
+                        resolve();
+                    }
+                };
+                this.peerConnection.addEventListener('icegatheringstatechange', checkState);
+                
+                // 2.5 second timeout
+                timeout = setTimeout(() => {
+                    this.peerConnection.removeEventListener('icegatheringstatechange', checkState);
+                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'warn', msg: 'ICE Gathering Timeout (2.5s) reached. Proceeding with collected candidates.' }}));
+                    resolve();
+                }, 2500);
+            }
+        });
+    }
+}
+
+// ==========================================
+// UI / MAIN RUNNER
+// ==========================================
+const ui = {
+    btnHost: document.getElementById('btn-host'),
+    btnJoin: document.getElementById('btn-join'),
+    btnScanAns: document.getElementById('btn-scan-answer'),
+    qrContainer: document.getElementById('qr-container'),
+    scannerContainer: document.getElementById('scanner-container'),
+    qrPlaceholder: document.getElementById('qr-placeholder'),
+    qrCanvas: document.getElementById('qr-canvas'),
+    qrInstructions: document.getElementById('qr-instructions'),
+    statusBadge: document.getElementById('connection-status'),
+    messagesBox: document.getElementById('messages'),
+    chatInput: document.getElementById('chat-input'),
+    btnSend: document.getElementById('btn-send'),
+    chatForm: document.getElementById('chat-form'),
+    diagnosticsOut: document.getElementById('diagnostics-out'),
+    iceServersDisplay: document.getElementById('ice-servers-display'),
+    pasteInput: document.getElementById('paste-input'),
+    btnSubmitPaste: document.getElementById('btn-submit-paste')
+};
+
+// Initialize Display
+if (document.getElementById('app-version')) document.getElementById('app-version').textContent = APP_VERSION;
+STUN_SERVERS.iceServers.forEach(server => {
+    let li = document.createElement('li');
+    li.textContent = server.urls;
+    ui.iceServersDisplay.appendChild(li);
+});
+
+const peerNode = new PeerManager();
 let html5QrcodeScanner;
-
-// UI Elements
-const btnHost = document.getElementById('btn-host');
-const btnJoin = document.getElementById('btn-join');
-const btnScanAnswer = document.getElementById('btn-scan-answer');
-const qrContainer = document.getElementById('qr-container');
-const scannerContainer = document.getElementById('scanner-container');
-const qrCanvas = document.getElementById('qr-canvas');
-const qrInstructions = document.getElementById('qr-instructions');
-const messagesBox = document.getElementById('messages');
-const chatInput = document.getElementById('chat-input');
-const btnSend = document.getElementById('btn-send');
-const statusBadge = document.getElementById('connection-status');
-const readerDiv = document.getElementById('reader');
-const pasteInput = document.getElementById('paste-input');
-const btnSubmitPaste = document.getElementById('btn-submit-paste');
-const appVersionDisplay = document.getElementById('app-version');
-
-if (appVersionDisplay) appVersionDisplay.textContent = APP_VERSION;
-
-let rawSDPPayload = ""; // used for copying
+let rawSDPPayload = "";
 let currentScanSuccessCallback = null;
 
+function htmlEscape(str) {
+    return String(str).replace(/[&<>"'`=\/]/g, function (s) {
+        return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;', '`': '&#x60;', '=': '&#x3D;' }[s];
+    });
+}
+
+function CandTypeMapping(typeStr) {
+    let typeMap = typeStr.toLowerCase();
+    if(typeMap === 'host') return '<span class="badge badge-host">HOST</span>';
+    if(typeMap === 'srflx') return '<span class="badge badge-srflx">SRFLX</span>';
+    if(typeMap === 'relay') return '<span class="badge badge-turn">RELAY</span>';
+    return `<span class="badge badge-host">${htmlEscape(typeStr.toUpperCase())}</span>`;
+}
+
+// Diagnostics Logging
+function logDiag(type, msg) {
+    const div = document.createElement('div');
+    if(type === 'ice') {
+        let span = document.createElement('span');
+        span.className = 'diag-ice';
+        // Parse the message to format the tags manually
+        let typematch = msg.match(/\[(.*?)\]/);
+        if (typematch) {
+             let tag = CandTypeMapping(typematch[1]);
+             span.innerHTML = tag + " " + htmlEscape(msg.replace(`[${typematch[1]}] `, ''));
+        } else {
+             span.textContent = msg;
+        }
+        div.appendChild(span);
+    } else {
+        div.className = `diag-${type}`;
+        div.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`;
+    }
+    ui.diagnosticsOut.appendChild(div);
+    ui.diagnosticsOut.scrollTop = ui.diagnosticsOut.scrollHeight;
+}
+
+// App Logic Logs
+peerNode.addEventListener('diagnostic', (e) => logDiag(e.detail.type, e.detail.msg));
+peerNode.addEventListener('status', (e) => {
+    const status = e.detail;
+    ui.statusBadge.textContent = status.toUpperCase();
+    ui.statusBadge.className = '';
+    if (status === 'connected') {
+        ui.statusBadge.classList.add('status-connected');
+        cleanupUI();
+    }
+    else if (status === 'disconnected') ui.statusBadge.classList.add('status-disconnected');
+    else ui.statusBadge.classList.add('status-connecting');
+});
+
+// Chat Log
 function logMessage(msg, type = 'system') {
     const div = document.createElement('div');
     if(type === 'system') div.style.color = '#888';
     if(type === 'me') div.style.color = '#4ade80';
     if(type === 'peer') div.style.color = '#60a5fa';
     div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    messagesBox.appendChild(div);
-    messagesBox.scrollTop = messagesBox.scrollHeight;
+    ui.messagesBox.appendChild(div);
+    ui.messagesBox.scrollTop = ui.messagesBox.scrollHeight;
 }
 
-function updateStatus(status) {
-    statusBadge.textContent = status.toUpperCase();
-    statusBadge.className = '';
-    if (status === 'connected') statusBadge.classList.add('status-connected');
-    else if (status === 'disconnected') statusBadge.classList.add('status-disconnected');
-    else statusBadge.classList.add('status-connecting');
-}
+peerNode.addEventListener('chatState', (e) => {
+    ui.chatInput.disabled = !e.detail;
+    ui.btnSend.disabled = !e.detail;
+});
+peerNode.addEventListener('message', (e) => {
+    if (e.detail.incoming) logMessage(`Peer: ${e.detail.text}`, 'peer');
+    else logMessage(`Me: ${e.detail.text}`, 'me');
+});
 
-function initPeerConnection() {
-    peerConnection = new RTCPeerConnection(STUN_SERVERS);
+ui.chatForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = ui.chatInput.value.trim();
+    if(text) {
+        peerNode.send(text);
+        ui.chatInput.value = '';
+    }
+});
+
+// ==========================================
+// SCANNER & QR ENGINE
+// ==========================================
+async function displayQRCode(dataStr, instructions) {
+    ui.scannerContainer.style.display = 'none';
+    if(ui.qrPlaceholder) ui.qrPlaceholder.style.display = 'none';
+    ui.qrContainer.style.display = 'block';
+    ui.qrInstructions.textContent = instructions;
     
-    peerConnection.oniceconnectionstatechange = () => {
-        logMessage(`ICE Connection State: ${peerConnection.iceConnectionState}`);
-        if(peerConnection.iceConnectionState === 'connected') {
-            updateStatus('connected');
-            cleanupUI();
-            chatInput.disabled = false;
-            btnSend.disabled = false;
-        } else if (peerConnection.iceConnectionState === 'disconnected') {
-            updateStatus('disconnected');
-            chatInput.disabled = true;
-            btnSend.disabled = true;
-        }
-    };
-
-    peerConnection.ondatachannel = (event) => {
-        logMessage('Data channel received from peer.');
-        setupDataChannel(event.channel);
-    };
-}
-
-function setupDataChannel(channel) {
-    dataChannel = channel;
-    dataChannel.onopen = () => logMessage('Data channel opened!');
-    dataChannel.onclose = () => logMessage('Data channel closed.');
-    dataChannel.onmessage = (event) => logMessage(`Peer: ${event.data}`, 'peer');
-}
-
-async function waitForIceGathering() {
-    return new Promise((resolve) => {
-        if (peerConnection.iceGatheringState === 'complete') {
-            resolve();
-        } else {
-            let timeout;
-            const checkState = () => {
-                if (peerConnection.iceGatheringState === 'complete') {
-                    peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                    clearTimeout(timeout);
-                    resolve();
-                }
-            };
-            peerConnection.addEventListener('icegatheringstatechange', checkState);
-            
-            // Timeout after 2 seconds to avoid laptops hanging on virtual interfaces
-            timeout = setTimeout(() => {
-                peerConnection.removeEventListener('icegatheringstatechange', checkState);
-                logMessage('ICE gathering timed out, proceeding with current candidates.', 'system');
-                resolve();
-            }, 2000);
-        }
-    });
-}
-
-async function compressData(dataStr) {
-    const stream = new Blob([dataStr], {type: 'application/json'}).stream().pipeThrough(new CompressionStream('deflate-raw'));
-    const blob = await new Response(stream).blob();
-    const buffer = await blob.arrayBuffer();
-    return btoa(String.fromCharCode(...new Uint8Array(buffer)));
-}
-
-async function decompressData(b64Str) {
-    const bytes = Uint8Array.from(atob(b64Str), c => c.charCodeAt(0));
-    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-    const blob = await new Response(stream).blob();
-    return await blob.text();
-}
-
-async function generateQRCode(data, instructions) {
-    scannerContainer.style.display = 'none';
-    qrContainer.style.display = 'block';
-    qrInstructions.textContent = instructions;
-    
-    // Compress data to fit in QR code more easily
-    const compressed = await compressData(data);
-    rawSDPPayload = compressed;
-    logMessage(`Generated Payload size: ${compressed.length} characters`);
+    logDiag('info', 'Compressing SDP payload...');
+    rawSDPPayload = await ConnectionUtils.compressData(dataStr);
+    logDiag('success', `Payload compressed to ${rawSDPPayload.length} chars`);
     
     try {
-        qrCanvas.innerHTML = '';
-        new QRCode(qrCanvas, {
-            text: compressed,
+        ui.qrCanvas.innerHTML = '';
+        new QRCode(ui.qrCanvas, {
+            text: rawSDPPayload,
             width: 300,
             height: 300,
             correctLevel: QRCode.CorrectLevel.L
         });
-        logMessage('QR code generated successfully.', 'system');
-    } catch (e) {
-        logMessage(`QR Error: ${e.message || e}`, 'system');
+    } catch(e) {
+        logDiag('error', `QR Canvas err: ${e.message}`);
     }
 }
 
 function startScanner(onSuccess) {
-    qrContainer.style.display = 'none';
-    scannerContainer.style.display = 'block';
+    ui.qrContainer.style.display = 'none';
+    if(ui.qrPlaceholder) ui.qrPlaceholder.style.display = 'none';
+    ui.scannerContainer.style.display = 'block';
     currentScanSuccessCallback = onSuccess;
     
     if (html5QrcodeScanner) {
         try { html5QrcodeScanner.clear(); } catch(e){}
     }
     
-    // Removed qrbox to scan the full video frame, which helps fixed-focus laptop webcams
-    html5QrcodeScanner = new Html5QrcodeScanner(
-      "reader",
-      { fps: 10 },
-      /* verbose= */ false);
-      
+    html5QrcodeScanner = new Html5QrcodeScanner("reader", { fps: 10 }, false);
+    
+    let failureCount = 0;
+    
     html5QrcodeScanner.render(async (decodedText, decodedResult) => {
+        // Success Handler
         try { html5QrcodeScanner.clear(); } catch(e){}
-        scannerContainer.style.display = 'none';
+        ui.scannerContainer.style.display = 'none';
+        logDiag('success', 'QR Code parameters identified! Extracting payload...');
         
         try {
-            const decompressed = await decompressData(decodedText);
+            const decompressed = await ConnectionUtils.decompressData(decodedText);
             const data = JSON.parse(decompressed);
             onSuccess(data);
         } catch (e) {
-            logMessage(`Error reading QR code payload: ${e.message}`, 'system');
-            alert("Failed to decode QR connection data. Please try again.");
+            logDiag('error', `Failed Data Decompression: ${e.message}`);
+            alert("Failed to decode connection data. Check diagnostics panel.");
+            // Restart scanner visually if failed
+            cleanupUI();
+            startScanner(onSuccess);
         }
     }, (err) => {
-        // ignore running errors
+        // Error / Retry Handler (Avoid flooding log on empty frames)
+        if(err && !err.includes("NotFoundException")) {
+            failureCount++;
+            if(failureCount % 5 === 0) {
+                logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
+            }
+        }
     });
 }
 
 function cleanupUI() {
-    qrContainer.style.display = 'none';
-    scannerContainer.style.display = 'none';
-    if(html5QrcodeScanner) {
-        try { html5QrcodeScanner.clear(); } catch(e){}
+    ui.qrContainer.style.display = 'none';
+    ui.scannerContainer.style.display = 'none';
+    if(ui.qrPlaceholder && ui.statusBadge.textContent !== 'CONNECTED') {
+        ui.qrPlaceholder.style.display = 'block';
     }
+    if(html5QrcodeScanner) { try { html5QrcodeScanner.clear(); } catch(e){} }
 }
 
-// ========================
-// HOST FLOW
-// ========================
-btnHost.addEventListener('click', async () => {
+// ==========================================
+// EVENT BINDINGS
+// ==========================================
+ui.btnHost.addEventListener('click', async () => {
     logMessage('Starting as HOST...');
-    updateStatus('connecting');
-    initPeerConnection();
-    
-    // Host creates data channel
-    setupDataChannel(peerConnection.createDataChannel('chat'));
-    
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    
-    logMessage('Gathering ICE candidates... please wait.');
-    await waitForIceGathering();
-    
-    const offerPayload = JSON.stringify(peerConnection.localDescription);
-    await generateQRCode(offerPayload, "Step 1: Have the JOINER scan this QR code.");
-    
-    btnHost.style.display = 'none';
-    btnJoin.style.display = 'none';
-    btnScanAnswer.style.display = 'inline-block';
-});
-
-btnScanAnswer.addEventListener('click', () => {
-    logMessage('Opening camera to scan Answer...');
-    startScanner(async (answerData) => {
-        logMessage('Answer received. Setting remote description...');
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(answerData));
-        logMessage('Connection should establish shortly...', 'system');
-    });
-});
-
-// ========================
-// JOIN FLOW
-// ========================
-btnJoin.addEventListener('click', () => {
-    logMessage('Starting as JOINER. Waiting for Offer scan...');
-    updateStatus('connecting');
-    initPeerConnection();
-    
-    btnHost.style.display = 'none';
-    btnJoin.style.display = 'none';
-    
-    startScanner(async (offerData) => {
-        logMessage('Offer received. Creating Answer...');
-        await peerConnection.setRemoteDescription(new RTCSessionDescription(offerData));
-        
-        const answer = await peerConnection.createAnswer();
-        await peerConnection.setLocalDescription(answer);
-        
-        logMessage('Gathering ICE candidates... please wait.');
-        await waitForIceGathering();
-        
-        const answerPayload = JSON.stringify(peerConnection.localDescription);
-        await generateQRCode(answerPayload, "Step 2: Have the HOST scan this QR code.");
-    });
-});
-
-// ========================
-// MISC Handlers
-// ========================
-document.getElementById('btn-cancel-scan').addEventListener('click', () => {
-    cleanupUI();
-    btnHost.style.display = 'block';
-    btnJoin.style.display = 'block';
-    btnScanAnswer.style.display = 'none';
-    updateStatus('disconnected');
-});
-
-document.getElementById('btn-copy-sdp').addEventListener('click', () => {
-    navigator.clipboard.writeText(rawSDPPayload).then(() => {
-        alert("Payload copied to clipboard (useful if QR is too dense to scan)");
-    });
-});
-
-btnSubmitPaste.addEventListener('click', async () => {
-    if (!currentScanSuccessCallback) return;
-    const pastedText = pasteInput.value.trim();
-    if (!pastedText) return;
+    logDiag('info', '--- HOST SEQUENCE ---');
+    ui.btnHost.style.display = 'none';
+    ui.btnJoin.style.display = 'none';
+    ui.btnScanAns.style.display = 'inline-block';
     
     try {
-        const decompressed = await decompressData(pastedText);
-        const data = JSON.parse(decompressed);
-        
-        if (html5QrcodeScanner) {
-            try { html5QrcodeScanner.clear(); } catch(e){}
-        }
-        scannerContainer.style.display = 'none';
-        pasteInput.value = '';
-        
-        currentScanSuccessCallback(data);
+        const offerData = await peerNode.createOffer();
+        displayQRCode(offerData, "Step 1: Have JOINER scan this.");
     } catch (e) {
-        logMessage(`Error reading pasted payload: ${e.message}`, 'system');
-        alert("Failed to decode pasted connection data. Please try again.");
+        logDiag('error', 'Critical failure generating Host Offer.');
     }
 });
 
-function sendMessage() {
-    const text = chatInput.value.trim();
-    if(text && dataChannel && dataChannel.readyState === 'open') {
-        dataChannel.send(text);
-        logMessage(`Me: ${text}`, 'me');
-        chatInput.value = '';
-    }
-}
+ui.btnJoin.addEventListener('click', () => {
+    logMessage('Starting as JOINER...');
+    logDiag('info', '--- JOIN SEQUENCE ---');
+    ui.btnHost.style.display = 'none';
+    ui.btnJoin.style.display = 'none';
+    
+    startScanner(async (offerData) => {
+        logDiag('info', 'Ingested Offer constraints. Computing Answer SDP...');
+        try {
+            const answerData = await peerNode.createAnswer(offerData);
+            displayQRCode(answerData, "Step 2: Have HOST scan this.");
+        } catch (e) {
+            logDiag('error', 'Critical failure computing Joiner Answer.');
+        }
+    });
+});
 
-btnSend.addEventListener('click', sendMessage);
-chatInput.addEventListener('keypress', (e) => {
-    if(e.key === 'Enter') sendMessage();
+ui.btnScanAns.addEventListener('click', () => {
+    logDiag('info', 'Opening scanner for Answer.');
+    startScanner(async (answerData) => {
+        logDiag('info', 'Applying Answer remotely...');
+        await peerNode.acceptAnswer(answerData);
+    });
+});
+
+// Misc Bindings
+document.getElementById('btn-cancel-scan').addEventListener('click', () => {
+    cleanupUI();
+    ui.btnHost.style.display = 'block';
+    ui.btnJoin.style.display = 'block';
+    ui.btnScanAns.style.display = 'none';
+    if(peerNode.peerConnection) peerNode.peerConnection.close();
+});
+
+document.getElementById('btn-clear-diag').addEventListener('click', () => {
+    ui.diagnosticsOut.innerHTML = '';
+    logDiag('info', 'Diagnostics Cleared.');
+});
+
+document.getElementById('btn-copy-sdp').addEventListener('click', async () => {
+    try {
+        await navigator.clipboard.writeText(rawSDPPayload);
+        alert("Payload copied to clipboard.");
+    } catch(e) {
+        logDiag('error', "Clipboard access denied. This requires HTTPS.");
+    }
+});
+
+ui.btnSubmitPaste.addEventListener('click', async () => {
+    if (!currentScanSuccessCallback) return;
+    const text = ui.pasteInput.value.trim();
+    if (!text) return;
+    try {
+        logDiag('info', 'Attempting to unpack pasted string...');
+        const decompressed = await ConnectionUtils.decompressData(text);
+        currentScanSuccessCallback(JSON.parse(decompressed));
+        ui.pasteInput.value = '';
+        if(html5QrcodeScanner) try { html5QrcodeScanner.clear(); } catch(e){}
+        ui.scannerContainer.style.display = 'none';
+    } catch (e) {
+        logDiag('error', `Paste parsing failed: ${e.message}`);
+    }
 });
