@@ -1,4 +1,4 @@
-const APP_VERSION = "v1.0.1";
+const APP_VERSION = "v1.0.2";
 
 const STUN_SERVERS = {
     iceServers: [
@@ -105,13 +105,27 @@ async function waitForIceGathering() {
     });
 }
 
-function generateQRCode(data, instructions) {
+async function compressData(dataStr) {
+    const stream = new Blob([dataStr], {type: 'application/json'}).stream().pipeThrough(new CompressionStream('deflate-raw'));
+    const blob = await new Response(stream).blob();
+    const buffer = await blob.arrayBuffer();
+    return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+}
+
+async function decompressData(b64Str) {
+    const bytes = Uint8Array.from(atob(b64Str), c => c.charCodeAt(0));
+    const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+    const blob = await new Response(stream).blob();
+    return await blob.text();
+}
+
+async function generateQRCode(data, instructions) {
     scannerContainer.style.display = 'none';
     qrContainer.style.display = 'block';
     qrInstructions.textContent = instructions;
     
     // Compress data to fit in QR code more easily
-    const compressed = LZString.compressToEncodedURIComponent(data);
+    const compressed = await compressData(data);
     rawSDPPayload = compressed;
     logMessage(`Generated Payload size: ${compressed.length} characters`);
     
@@ -144,12 +158,12 @@ function startScanner(onSuccess) {
       { fps: 10 },
       /* verbose= */ false);
       
-    html5QrcodeScanner.render((decodedText, decodedResult) => {
+    html5QrcodeScanner.render(async (decodedText, decodedResult) => {
         try { html5QrcodeScanner.clear(); } catch(e){}
         scannerContainer.style.display = 'none';
         
         try {
-            const decompressed = LZString.decompressFromEncodedURIComponent(decodedText);
+            const decompressed = await decompressData(decodedText);
             const data = JSON.parse(decompressed);
             onSuccess(data);
         } catch (e) {
@@ -186,24 +200,8 @@ btnHost.addEventListener('click', async () => {
     logMessage('Gathering ICE candidates... please wait.');
     await waitForIceGathering();
     
-    // Optimize SDP to reduce QR size
-    const optDesc = {
-        type: peerConnection.localDescription.type,
-        sdp: peerConnection.localDescription.sdp
-            .split('\r\n')
-            .filter(line => {
-                // Remove non-essential candidate lines (e.g. TCP)
-                if (line.startsWith('a=candidate:')) {
-                    return line.includes(' udp ');
-                }
-                // Keep all other lines
-                return true;
-            })
-            .join('\r\n')
-    };
-    
-    const offerPayload = JSON.stringify(optDesc);
-    generateQRCode(offerPayload, "Step 1: Have the JOINER scan this QR code.");
+    const offerPayload = JSON.stringify(peerConnection.localDescription);
+    await generateQRCode(offerPayload, "Step 1: Have the JOINER scan this QR code.");
     
     btnHost.style.display = 'none';
     btnJoin.style.display = 'none';
@@ -240,24 +238,8 @@ btnJoin.addEventListener('click', () => {
         logMessage('Gathering ICE candidates... please wait.');
         await waitForIceGathering();
         
-        // Optimize SDP to reduce QR size
-        const optDesc = {
-            type: peerConnection.localDescription.type,
-            sdp: peerConnection.localDescription.sdp
-                .split('\r\n')
-                .filter(line => {
-                    // Remove non-essential candidate lines (e.g. TCP)
-                    if (line.startsWith('a=candidate:')) {
-                        return line.includes(' udp ');
-                    }
-                    // Keep all other lines
-                    return true;
-                })
-                .join('\r\n')
-        };
-        
-        const answerPayload = JSON.stringify(optDesc);
-        generateQRCode(answerPayload, "Step 2: Have the HOST scan this QR code.");
+        const answerPayload = JSON.stringify(peerConnection.localDescription);
+        await generateQRCode(answerPayload, "Step 2: Have the HOST scan this QR code.");
     });
 });
 
@@ -278,13 +260,13 @@ document.getElementById('btn-copy-sdp').addEventListener('click', () => {
     });
 });
 
-btnSubmitPaste.addEventListener('click', () => {
+btnSubmitPaste.addEventListener('click', async () => {
     if (!currentScanSuccessCallback) return;
     const pastedText = pasteInput.value.trim();
     if (!pastedText) return;
     
     try {
-        const decompressed = LZString.decompressFromEncodedURIComponent(pastedText);
+        const decompressed = await decompressData(pastedText);
         const data = JSON.parse(decompressed);
         
         if (html5QrcodeScanner) {
