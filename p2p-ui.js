@@ -9,7 +9,29 @@ export class P2PUIManager {
         
         this.createUI();
         this.bindEvents();
+        this._setupInterTabComms();
         this._checkURLFragment();
+    }
+
+    _setupInterTabComms() {
+        this.bc = new BroadcastChannel('p2p-signaling');
+        this.bc.onmessage = (e) => {
+            if (e.data.type === 'answer' && this.peerNode.peers.has(e.data.payload.peerId)) {
+                this.logDiag('info', 'Applied Answer from another tab via BroadcastChannel.');
+                this.peerNode.acceptAnswer(e.data.payload);
+            }
+        };
+
+        window.addEventListener('storage', (e) => {
+            if (e.key === 'p2p-answer-forward' && e.newValue) {
+                const data = JSON.parse(e.newValue);
+                if (this.peerNode.peers.has(data.peerId)) {
+                    this.logDiag('info', 'Applied Answer from another tab via localStorage.');
+                    this.peerNode.acceptAnswer(data);
+                    localStorage.removeItem('p2p-answer-forward');
+                }
+            }
+        });
     }
 
     // ==========================================
@@ -47,8 +69,23 @@ export class P2PUIManager {
                 this.displayQRCode(answerData, "Share your answer with the host.");
             } else {
                 // Act as host finishing the handshake
-                this.logDiag('info', 'Applying Answer from URL...');
-                await this.peerNode.acceptAnswer(data);
+                if (this.peerNode.peers.has(data.peerId)) {
+                    this.logDiag('info', 'Applying Answer from URL in original tab...');
+                    await this.peerNode.acceptAnswer(data);
+                } else {
+                    this.logDiag('info', 'Not the host tab. Forwarding Answer to main tab...');
+                    this.bc.postMessage({ type: 'answer', payload: data });
+                    localStorage.setItem('p2p-answer-forward', JSON.stringify(data));
+                    
+                    // Hide scanner/buttons and show a friendly message
+                    this.ui.qrContainer.style.display = 'block';
+                    this.ui.qrInstructions.innerHTML = "<strong>Connection sent to main game tab!</strong><br><br>You can close this window.";
+                    if (this.ui.btnShareSdp) this.ui.btnShareSdp.style.display = 'none';
+                    if (this.ui.btnCopySdp) this.ui.btnCopySdp.style.display = 'none';
+                    if (this.ui.qrCanvas) this.ui.qrCanvas.style.display = 'none';
+                    const details = this.ui.qrContainer.querySelector('details');
+                    if (details) details.style.display = 'none';
+                }
             }
         } catch (e) {
             this.logDiag('error', `URL payload ingestion failed: ${e.message}`);
@@ -332,8 +369,15 @@ export class P2PUIManager {
 
         this.ui.btnSubmitPaste.addEventListener('click', async () => {
             if (!this.currentScanSuccessCallback) return;
-            const text = this.ui.pasteInput.value.trim();
+            let text = this.ui.pasteInput.value.trim();
             if (!text) return;
+            
+            // Extract payload if they pasted a full URL
+            const offerMatch = text.match(/[#&]p2p-offer=([^&]+)/);
+            const answerMatch = text.match(/[#&]p2p-answer=([^&]+)/);
+            if (offerMatch) text = offerMatch[1];
+            else if (answerMatch) text = answerMatch[1];
+            
             try {
                 this.logDiag('info', 'Attempting to unpack pasted string...');
                 const decompressed = await ConnectionUtils.decompressData(text);
