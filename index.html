@@ -45,7 +45,12 @@
                 <h2>QR Area</h2>
                 <div id="qr-container" style="display: none;">
                     <p id="qr-instructions"></p>
-                    <div id="qr-canvas"></div>
+                    <button id="btn-share-sdp" class="btn primary" style="font-size:15px; padding: 12px 28px; width: auto;">📤 Share Link</button>
+                    <div id="share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px; background:#052e16; border:1px solid #4ade80; border-radius:6px; padding:6px 14px;"></div>
+                    <details style="margin-top:12px;">
+                        <summary style="cursor:pointer; color:#888; font-size:12px;">Show QR code instead</summary>
+                        <div id="qr-canvas" style="margin-top:8px;"></div>
+                    </details>
                     <br>
                     <button id="btn-copy-sdp" class="btn text-btn" style="background: transparent; color: #60a5fa; border: 1px solid #60a5fa;">Copy Raw Data</button>
                 </div>

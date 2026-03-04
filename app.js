@@ -284,6 +284,82 @@ ui.chatForm.addEventListener('submit', (e) => {
 });
 
 // ==========================================
+// SHARE / URL FRAGMENT
+// ==========================================
+let currentShareType = 'offer'; // 'offer' or 'answer'
+
+async function shareOrCopy(payload, type, instructions) {
+    const shareURL = window.location.href.split('#')[0] + `#p2p-${type}=${payload}`;
+
+    if (navigator.share) {
+        try {
+            await navigator.share({
+                title: type === 'offer' ? 'P2P Game Invite' : 'P2P Connection Answer',
+                text: instructions,
+                url: shareURL,
+            });
+            logDiag('success', `Shared ${type} via native share sheet.`);
+            showShareToast('Shared!');
+            return;
+        } catch (e) {
+            if (e.name === 'AbortError') return; // user cancelled
+            logDiag('warn', `Native share failed: ${e.message}. Falling back to clipboard.`);
+        }
+    }
+
+    try {
+        await navigator.clipboard.writeText(shareURL);
+        logDiag('success', 'Share URL copied to clipboard!');
+        showShareToast('Link copied! Send it to your opponent.');
+    } catch (e) {
+        logDiag('warn', 'Clipboard unavailable. Showing manual copy prompt.');
+        prompt('Copy this link and send it to your opponent:', shareURL);
+    }
+}
+
+function showShareToast(msg) {
+    const toast = document.getElementById('share-toast');
+    if (!toast) return;
+    toast.textContent = msg;
+    toast.style.display = 'block';
+    setTimeout(() => { toast.style.display = 'none'; }, 3000);
+}
+
+function checkURLFragment() {
+    const hash = window.location.hash;
+    const offerMatch = hash.match(/[#&]p2p-offer=([^&]+)/);
+    const answerMatch = hash.match(/[#&]p2p-answer=([^&]+)/);
+    if (!offerMatch && !answerMatch) return;
+
+    const payload = offerMatch ? offerMatch[1] : answerMatch[1];
+    const type = offerMatch ? 'offer' : 'answer';
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+    ingestURLPayload(payload, type);
+}
+
+async function ingestURLPayload(payload, type) {
+    logDiag('info', `URL ${type} detected. Ingesting...`);
+    try {
+        const decompressed = await ConnectionUtils.decompressData(payload);
+        const data = JSON.parse(decompressed);
+
+        if (type === 'offer') {
+            ui.btnHost.style.display = 'none';
+            ui.btnJoin.style.display = 'none';
+            logDiag('info', 'Computing Answer SDP...');
+            const answerData = await peerNode.createAnswer(data);
+            currentShareType = 'answer';
+            displayQRCode(answerData, 'Share your answer with the host.');
+        } else {
+            logDiag('info', 'Applying Answer from URL...');
+            await peerNode.acceptAnswer(data);
+        }
+    } catch (e) {
+        logDiag('error', `URL payload ingestion failed: ${e.message}`);
+    }
+}
+
+// ==========================================
 // SCANNER & QR ENGINE
 // ==========================================
 async function displayQRCode(dataStr, instructions) {
@@ -300,8 +376,8 @@ async function displayQRCode(dataStr, instructions) {
         ui.qrCanvas.innerHTML = '';
         new QRCode(ui.qrCanvas, {
             text: rawSDPPayload,
-            width: 300,
-            height: 300,
+            width: 256,
+            height: 256,
             correctLevel: QRCode.CorrectLevel.L
         });
     } catch(e) {
@@ -372,7 +448,8 @@ ui.btnHost.addEventListener('click', async () => {
     
     try {
         const offerData = await peerNode.createOffer();
-        displayQRCode(offerData, "Step 1: Have JOINER scan this.");
+        currentShareType = 'offer';
+        displayQRCode(offerData, "Step 1: Share this with your joiner.");
     } catch (e) {
         logDiag('error', 'Critical failure generating Host Offer.');
     }
@@ -417,14 +494,24 @@ document.getElementById('btn-clear-diag').addEventListener('click', () => {
     logDiag('info', 'Diagnostics Cleared.');
 });
 
+document.getElementById('btn-share-sdp').addEventListener('click', async () => {
+    const instructions = currentShareType === 'offer'
+        ? 'Open this link to join my game!'
+        : 'Open this link to complete the connection.';
+    await shareOrCopy(rawSDPPayload, currentShareType, instructions);
+});
+
 document.getElementById('btn-copy-sdp').addEventListener('click', async () => {
     try {
         await navigator.clipboard.writeText(rawSDPPayload);
-        alert("Payload copied to clipboard.");
+        showShareToast('Raw data copied to clipboard.');
     } catch(e) {
         logDiag('error', "Clipboard access denied. This requires HTTPS.");
     }
 });
+
+// Check for incoming offer/answer in URL on page load
+checkURLFragment();
 
 ui.btnSubmitPaste.addEventListener('click', async () => {
     if (!currentScanSuccessCallback) return;
