@@ -9,6 +9,89 @@ export class P2PUIManager {
         
         this.createUI();
         this.bindEvents();
+        this._checkURLFragment();
+    }
+
+    // ==========================================
+    // URL FRAGMENT / SHARE API
+    // ==========================================
+
+    _checkURLFragment() {
+        const hash = window.location.hash;
+        const offerMatch = hash.match(/[#&]p2p-offer=([^&]+)/);
+        const answerMatch = hash.match(/[#&]p2p-answer=([^&]+)/);
+
+        if (offerMatch || answerMatch) {
+            // Show UI immediately so the user sees what's happening
+            this.show();
+            const payload = offerMatch ? offerMatch[1] : answerMatch[1];
+            const type = offerMatch ? 'offer' : 'answer';
+            this._ingestURLPayload(payload, type);
+            // Clean the fragment so refreshing doesn't re-trigger
+            history.replaceState(null, '', window.location.pathname + window.location.search);
+        }
+    }
+
+    async _ingestURLPayload(payload, type) {
+        try {
+            this.logDiag('info', `URL ${type} detected. Ingesting...`);
+            const decompressed = await ConnectionUtils.decompressData(payload);
+            const data = JSON.parse(decompressed);
+
+            if (type === 'offer') {
+                // Act as joiner: consume offer, generate answer, share it back
+                this.ui.btnHost.style.display = 'none';
+                this.ui.btnJoin.style.display = 'none';
+                this.logDiag('info', 'Computing Answer SDP...');
+                const answerData = await this.peerNode.createAnswer(data);
+                this.displayQRCode(answerData, "Share your answer with the host.");
+            } else {
+                // Act as host finishing the handshake
+                this.logDiag('info', 'Applying Answer from URL...');
+                await this.peerNode.acceptAnswer(data);
+            }
+        } catch (e) {
+            this.logDiag('error', `URL payload ingestion failed: ${e.message}`);
+        }
+    }
+
+    async _shareOrCopy(payload, type, instructions) {
+        const fragment = `#p2p-${type}=${payload}`;
+        const shareURL = window.location.href.split('#')[0] + fragment;
+
+        if (navigator.share) {
+            try {
+                await navigator.share({
+                    title: `P2P ${type === 'offer' ? 'Game Invite' : 'Connection Answer'}`,
+                    text: instructions,
+                    url: shareURL,
+                });
+                this.logDiag('success', `Shared ${type} via native share sheet.`);
+                return;
+            } catch (e) {
+                if (e.name !== 'AbortError') {
+                    this.logDiag('warn', `Native share failed (${e.message}), falling back to clipboard.`);
+                }
+            }
+        }
+
+        // Fallback: copy URL to clipboard
+        try {
+            await navigator.clipboard.writeText(shareURL);
+            this.logDiag('success', 'Share URL copied to clipboard!');
+            this._showShareFeedback('Link copied! Send it to your opponent.');
+        } catch (e) {
+            // Last resort: prompt
+            this.logDiag('warn', 'Clipboard unavailable. Showing manual copy prompt.');
+            prompt('Copy this link and send it to your opponent:', shareURL);
+        }
+    }
+
+    _showShareFeedback(msg) {
+        if (!this.ui.shareToast) return;
+        this.ui.shareToast.textContent = msg;
+        this.ui.shareToast.style.display = 'block';
+        setTimeout(() => { this.ui.shareToast.style.display = 'none'; }, 3000);
     }
 
     show() {
@@ -46,7 +129,12 @@ export class P2PUIManager {
                 <div class="p2p-panel" style="margin-bottom: 15px;">
                     <div id="p2p-qr-container" style="display:none; text-align:center;">
                         <p id="p2p-qr-instructions"></p>
-                        <div id="p2p-qr-canvas"></div>
+                        <button id="p2p-btn-share-sdp" class="p2p-btn p2p-btn-primary" style="width:auto; padding: 10px 24px; font-size:15px;">📤 Share Link</button>
+                        <div id="p2p-share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px;"></div>
+                        <details style="margin-top:12px;">
+                            <summary style="cursor:pointer; color:#888; font-size:12px;">Show QR code instead</summary>
+                            <div id="p2p-qr-canvas" style="margin-top:8px;"></div>
+                        </details>
                         <br>
                         <button id="p2p-btn-copy-sdp" class="p2p-btn p2p-text-btn" style="width:auto;">Copy Raw Data</button>
                     </div>
@@ -90,6 +178,8 @@ export class P2PUIManager {
             qrContainer: document.getElementById('p2p-qr-container'),
             qrInstructions: document.getElementById('p2p-qr-instructions'),
             qrCanvas: document.getElementById('p2p-qr-canvas'),
+            btnShareSdp: document.getElementById('p2p-btn-share-sdp'),
+            shareToast: document.getElementById('p2p-share-toast'),
             btnCopySdp: document.getElementById('p2p-btn-copy-sdp'),
             scannerContainer: document.getElementById('p2p-scanner-container'),
             btnCancelScan: document.getElementById('p2p-btn-cancel-scan'),
@@ -223,10 +313,18 @@ export class P2PUIManager {
             });
         });
 
+        this.ui.btnShareSdp.addEventListener('click', async () => {
+            const type = this.peerNode.isHost ? 'offer' : 'answer';
+            const instructions = type === 'offer'
+                ? 'Open this link to join my game!'
+                : 'Open this link to complete the connection.';
+            await this._shareOrCopy(this.rawSDPPayload, type, instructions);
+        });
+
         this.ui.btnCopySdp.addEventListener('click', async () => {
             try {
                 await navigator.clipboard.writeText(this.rawSDPPayload);
-                alert("Payload copied to clipboard.");
+                this._showShareFeedback('Raw data copied to clipboard.');
             } catch(e) {
                 this.logDiag('error', "Clipboard access denied. This requires HTTPS.");
             }
@@ -263,8 +361,8 @@ export class P2PUIManager {
             this.ui.qrCanvas.innerHTML = '';
             new QRCode(this.ui.qrCanvas, {
                 text: this.rawSDPPayload,
-                width: 300,
-                height: 300,
+                width: 256,
+                height: 256,
                 correctLevel: QRCode.CorrectLevel.L
             });
         } catch(e) {

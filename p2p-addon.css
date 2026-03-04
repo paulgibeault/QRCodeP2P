@@ -88,3 +88,7 @@
 .p2p-diag-success { color: #4ade80; }
 .p2p-paste-section { margin-top: 15px; display: flex; gap: 10px; }
 #p2p-paste-input { flex: 1; padding: 8px; border-radius: 4px; background: #111; color: #fff; border: 1px solid #404040; }
+#p2p-btn-share-sdp { font-size: 15px; padding: 12px 28px; width: auto; letter-spacing: 0.02em; }
+#p2p-share-toast { background: #052e16; border: 1px solid #4ade80; border-radius: 6px; padding: 6px 14px; display: inline-block; }
+details summary { user-select: none; }
+details[open] summary { color: #aaa; }
