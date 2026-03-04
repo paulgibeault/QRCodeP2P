@@ -200,6 +200,11 @@ export class PeerManager extends EventTarget {
             return;
         }
 
+        if (peerData.connection.signalingState !== 'have-local-offer') {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Answer already processed for ${peerId}` }}));
+            return;
+        }
+
         try {
             await peerData.connection.setRemoteDescription(new RTCSessionDescription(answerPayload.sessionDesc));
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Answer accepted from ${peerId}` }}));
