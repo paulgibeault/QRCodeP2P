@@ -22,6 +22,10 @@ export class P2PAddon extends EventTarget {
         this.peerNode.addEventListener('status', (e) => {
             this.dispatchEvent(new CustomEvent('status', { detail: e.detail }));
         });
+
+        this.peerNode.addEventListener('diagnostic', (e) => {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: e.detail }));
+        });
     }
 
     async init() {

@@ -4,18 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>P2P QR Code Signaling</title>
-<!-- QR Code Generator -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
-<!-- QR Code Scanner -->
-<script src="https://unpkg.com/html5-qrcode"></script>
-<!-- Compression for SDP -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.5.0/lz-string.min.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="container">
     <header>
-        <h1>QR-Code P2P Connect <span id="app-version" style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;"></span></h1>
+        <h1>QR-Code P2P Connect <span style="font-size:0.5em; color:#888; vertical-align:middle; font-weight:normal; margin-left:10px;">v1.4.0</span></h1>
         <p>Establish a WebRTC connection with no signaling server!</p>
         <div id="connection-status" class="status-disconnected">Disconnected</div>
     </header>
@@ -26,51 +20,19 @@
                 <h2>Connection Setup</h2>
                 <p>Determine who will host and who will join.</p>
                 <div class="button-group">
-                    <button id="btn-host" class="btn primary">1. Host Session (Create Offer)</button>
-                    <button id="btn-join" class="btn primary">2. Join Session (Scan Offer)</button>
+                    <button id="btn-multiplayer" class="btn primary">Open Connection Menu</button>
                 </div>
-                <div class="button-group" style="margin-top: 20px;">
-                    <button id="btn-scan-answer" class="btn secondary" style="display:none;">3. Host: Scan Answer</button>
-                </div>
-                
-                <h3 style="font-size: 14px; margin-top: 30px; border-bottom: 1px solid #404040; padding-bottom: 5px;">Active ICE Servers <span style="font-size: 10px; color: #a1a1aa; float: right;">STUN/TURN</span></h3>
+
+                <h3 style="font-size:14px; margin-top:30px; border-bottom:1px solid #404040; padding-bottom:5px;">
+                    Active ICE Servers <span style="font-size:10px; color:#a1a1aa; float:right;">STUN/TURN</span>
+                </h3>
                 <div class="ice-servers-list">
                     <ul id="ice-servers-display">
-                        <!-- Populated by JS -->
+                        <li>stun:stun.l.google.com:19302</li>
                     </ul>
                 </div>
             </div>
 
-            <div class="panel qr-section">
-                <h2>QR Area</h2>
-                <div id="qr-container" style="display: none;">
-                    <p id="qr-instructions"></p>
-                    <button id="btn-share-sdp" class="btn primary" style="font-size:15px; padding: 12px 28px; width: auto;">📤 Share Link</button>
-                    <div id="share-toast" style="display:none; margin-top:8px; color:#4ade80; font-size:13px; background:#052e16; border:1px solid #4ade80; border-radius:6px; padding:6px 14px;"></div>
-                    <details style="margin-top:12px;">
-                        <summary style="cursor:pointer; color:#888; font-size:12px;">Show QR code instead</summary>
-                        <div id="qr-canvas" style="margin-top:8px;"></div>
-                    </details>
-                    <br>
-                    <button id="btn-copy-sdp" class="btn text-btn" style="background: transparent; color: #60a5fa; border: 1px solid #60a5fa;">Copy Raw Data</button>
-                </div>
-                <div id="scanner-container" style="display: none;">
-                    <div id="reader"></div>
-                    <div style="margin-top: 20px;" class="paste-section">
-                        <p style="margin-bottom: 5px;">Or paste code here:</p>
-                        <div class="input-group">
-                            <input type="text" id="paste-input" placeholder="Paste raw data...">
-                            <button id="btn-submit-paste" class="btn secondary">Submit</button>
-                        </div>
-                    </div>
-                    <button id="btn-cancel-scan" class="btn danger" style="margin-top: 10px;">Cancel Scan</button>
-                </div>
-                <!-- Additional default placeholder when nothing is active -->
-                <div id="qr-placeholder" style="text-align: center; color: #666; margin-top: 40px; font-style: italic;">
-                    Select Host or Join to begin.
-                </div>
-            </div>
-            
             <div class="panel chat-section">
                 <h2>Test Bed Console</h2>
                 <div id="messages" class="messages-box" role="log" aria-live="polite"></div>
@@ -83,14 +45,84 @@
             <div class="panel diagnostics-section">
                 <h2>Network Diagnostics</h2>
                 <div id="diagnostics-out" class="diagnostics-box" role="log" aria-live="polite">
-                    <div class="diag-info">[SYSTEM] Engine matching initialized.</div>
+                    <div class="diag-info">[SYSTEM] Engine initialized.</div>
                 </div>
-                <button id="btn-clear-diag" class="btn text-btn" style="background: #111; font-size: 12px; margin-top: 5px;">Clear Logs</button>
+                <button id="btn-clear-diag" class="btn text-btn" style="background:#111; font-size:12px; margin-top:5px;">Clear Logs</button>
             </div>
-
         </div>
     </main>
 </div>
-<script src="app.js"></script>
+
+<script type="module">
+    import P2PAddon from './p2p-addon.js';
+
+    const mp = new P2PAddon();
+    await mp.init();
+
+    // Open connection menu
+    document.getElementById('btn-multiplayer').addEventListener('click', () => mp.showUI());
+
+    // --- Status ---
+    const statusBadge = document.getElementById('connection-status');
+    mp.addEventListener('status', (e) => {
+        const { status } = e.detail;
+        statusBadge.textContent = status.toUpperCase();
+        statusBadge.className = '';
+        if (status === 'connected') {
+            statusBadge.classList.add('status-connected');
+            document.getElementById('btn-multiplayer').textContent = '✅ Connected';
+            logMessage('Connected to peer!', 'system');
+            document.getElementById('chat-input').disabled = false;
+            document.getElementById('btn-send').disabled = false;
+        } else if (status === 'disconnected') {
+            statusBadge.classList.add('status-disconnected');
+            document.getElementById('chat-input').disabled = true;
+            document.getElementById('btn-send').disabled = true;
+        } else {
+            statusBadge.classList.add('status-connecting');
+        }
+    });
+
+    // --- Chat ---
+    function logMessage(text, type = 'system') {
+        const div = document.createElement('div');
+        const colors = { system: '#888', me: '#4ade80', peer: '#60a5fa' };
+        div.style.color = colors[type] || '#888';
+        div.textContent = `[${new Date().toLocaleTimeString()}] ${text}`;
+        const box = document.getElementById('messages');
+        box.appendChild(div);
+        box.scrollTop = box.scrollHeight;
+    }
+
+    mp.addEventListener('message', (e) => {
+        logMessage(e.detail.incoming ? `Peer: ${e.detail.text}` : `Me: ${e.detail.text}`,
+                   e.detail.incoming ? 'peer' : 'me');
+    });
+
+    document.getElementById('chat-form').addEventListener('submit', (e) => {
+        e.preventDefault();
+        const input = document.getElementById('chat-input');
+        if (input.value.trim()) {
+            mp.send(input.value.trim());
+            input.value = '';
+        }
+    });
+
+    // --- Diagnostics passthrough ---
+    mp.addEventListener('diagnostic', (e) => {
+        const { type, msg } = e.detail;
+        const div = document.createElement('div');
+        div.className = `diag-${type}`;
+        div.textContent = `[${new Date().toLocaleTimeString().split(' ')[0]}] ${msg}`;
+        const out = document.getElementById('diagnostics-out');
+        out.appendChild(div);
+        out.scrollTop = out.scrollHeight;
+    });
+
+    document.getElementById('btn-clear-diag').addEventListener('click', () => {
+        const out = document.getElementById('diagnostics-out');
+        out.innerHTML = '<div class="diag-info">[SYSTEM] Diagnostics cleared.</div>';
+    });
+</script>
 </body>
 </html>
