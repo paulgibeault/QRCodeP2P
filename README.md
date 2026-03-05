@@ -10,12 +10,30 @@ Establish a WebRTC connection with no signaling server! This project demonstrate
 - **Cross-Device**: Works seamlessly between laptops, phones, and tablets.
 - **Real-Time Data Channel**: Once connected, you can use the Test Bed Console to send real-time chat messages directly from device to device.
 
-## How it Works
+## How it Works (v1.4.0 — Hybrid Signaling)
 
-Because WebRTC requires devices to explicitly agree on connection parameters before opening a peer-to-peer connection, we use an out-of-band signaling method constraint:
-1. **The Host** generates an "Offer" and displays it as a QR code.
-2. **The Joiner** scans the offer, generates an "Answer", and displays it as a QR code.
-3. **The Host** scans the answer to finalize the connection.
+Because WebRTC requires devices to explicitly agree on connection parameters before opening a peer-to-peer connection, we use a **hybrid signaling strategy** that is both resilient to transmit _and_ reliable to receive:
+
+### Leg 1 — Offer: Host → Joiner (resilient transmission)
+1. **The Host** clicks **Host** and the offer SDP is generated.
+2. On mobile, the native **Share Sheet** is used to send a URL containing the offer (iMessage, WhatsApp, etc.). On desktop (no Share API), a QR code is displayed instead.
+3. The joiner taps the link / scans the QR. The page opens and **auto-ingests the offer**.
+
+### Leg 2 — Answer: Joiner → Host (reliable return)
+4. The joiner's page **generates the answer and displays it as a QR code**. This is the universal path — no cross-tab or cross-browser forwarding required.
+5. The host clicks **"📷 Scan Answer QR"** to scan the joiner's screen. The answer is applied directly to the original host tab.
+
+### Auto-Connect Bonus
+When the joiner's page is in the same browser as the host (e.g., same Safari session), the answer is also silently forwarded via three parallel channels — **BroadcastChannel**, **localStorage**, and **window.opener.postMessage** — so the connection may complete without the host needing to scan at all.
+
+```
+HOST TAB                    JOINER DEVICE
+  |── Share URL (offer) ─────────>|  (tap link → page auto-ingests offer)
+  |                               |  (generates answer QR)
+  |<── HOST scans joiner's QR ───|
+  |  (host tab applies answer)    |
+  ════════ CONNECTION ESTABLISHED ════════
+```
 
 Everything happens securely and locally after the initial exchange.
 
