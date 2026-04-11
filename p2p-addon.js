@@ -73,6 +73,17 @@ export class P2PAddon extends EventTarget {
         if (this.ui) this.ui.hide();
     }
 
+    /**
+     * Fully tears down all P2P resources: closes peer connections, BroadcastChannel,
+     * window event listeners, QR scanner, and removes the modal DOM. After calling
+     * destroy(), call init() again to reinitialize for a new session.
+     */
+    destroy() {
+        this.ui?.destroy();
+        this.ui = null;
+        this.peerNode?.destroy();
+    }
+
     send(data) {
         if (typeof data !== 'string') {
             data = JSON.stringify(data);

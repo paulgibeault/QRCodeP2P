@@ -27,6 +27,28 @@ export class ConnectionUtils {
             throw new Error(`Decompression failed: ${e.message}`);
         }
     }
+
+    /**
+     * Validates that a signaling payload has the expected structure before
+     * passing it to WebRTC internals. Throws a descriptive Error on failure.
+     * @param {*} data - The deserialized payload object.
+     * @param {string[]} [requiredFields=['peerId','sessionDesc']] - Fields that must be present.
+     * @returns {object} The validated data object (pass-through).
+     */
+    static validatePayload(data, requiredFields = ['peerId', 'sessionDesc']) {
+        if (!data || typeof data !== 'object' || Array.isArray(data)) {
+            throw new Error('Invalid payload: expected a plain object');
+        }
+        for (const field of requiredFields) {
+            if (!(field in data)) {
+                throw new Error(`Invalid payload: missing required field "${field}"`);
+            }
+        }
+        if (data.sessionDesc && (typeof data.sessionDesc.type !== 'string' || typeof data.sessionDesc.sdp !== 'string')) {
+            throw new Error('Invalid payload: sessionDesc must have string fields "type" and "sdp"');
+        }
+        return data;
+    }
 }
 
 // ==========================================
@@ -122,8 +144,10 @@ export class PeerManager extends EventTarget {
                 this.broadcast(data, peerId);
             }
 
+            // Destructure only the expected fields to avoid merging arbitrary keys
+            const { text, from } = parsed;
             this.dispatchEvent(new CustomEvent('message', { 
-                detail: Object.assign({}, parsed, { incoming: true, peerId }) 
+                detail: { text, from, incoming: true, peerId } 
             }));
         };
     }
@@ -151,6 +175,18 @@ export class PeerManager extends EventTarget {
         } else {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: 'Cannot send, no channels open.' }}));
         }
+    }
+
+    /**
+     * Closes all peer connections and data channels, then clears the peers Map.
+     * After destroy(), this instance should not be reused.
+     */
+    destroy() {
+        this.peers.forEach((peerData) => {
+            try { peerData.dataChannel?.close(); } catch(_) {}
+            try { peerData.connection.close(); } catch(_) {}
+        });
+        this.peers.clear();
     }
 
     async createOffer() {

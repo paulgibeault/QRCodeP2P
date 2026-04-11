@@ -36,6 +36,17 @@ document.getElementById('my-multiplayer-btn').addEventListener('click', () => {
 ### `hideUI()`
 Closes the multiplayer connection modal.
 
+### `destroy()`
+Fully tears down all P2P resources: closes all `RTCPeerConnection` instances, the `BroadcastChannel`,
+window event listeners, any active QR scanner, and removes the injected modal DOM. Call this when the
+player leaves the lobby or the round ends, then call `init()` again to reinitialize for a new session.
+```javascript
+// e.g., when the game round ends
+multiplayer.destroy();
+// Later, to start a fresh session:
+await multiplayer.init();
+```
+
 ### `send(data)`
 Sends data to the connected peer over the WebRTC data channel. Automatically stringifies JSON objects.
 ```javascript
@@ -48,11 +59,12 @@ multiplayer.send({ player: 1, action: "jump", x: 100, y: 200 });
 The addon extends `EventTarget`, allowing you to listen using standard `addEventListener`.
 
 #### Event: `status`
-Fired when the connection state changes.
+Fired when the connection state changes. `event.detail` is an object `{ peerId, status }`.
 ```javascript
 multiplayer.addEventListener('status', (event) => {
-    console.log("Connection status:", event.detail); 
-    // e.g., "connected", "disconnected", "connecting"
+    const { peerId, status } = event.detail;
+    console.log(`Peer ${peerId} is now: ${status}`);
+    // status values: "connected", "disconnected", "failed", "checking", ...
 });
 ```
 
