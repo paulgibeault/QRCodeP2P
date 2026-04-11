@@ -212,6 +212,11 @@ export class P2PUIManager {
 
     show() {
         this.ui.overlay.style.display = 'flex';
+        setTimeout(() => {
+            const focusable = this.ui.overlay.querySelectorAll('button, input');
+            const visible = Array.from(focusable).filter(el => ((el.offsetWidth > 0 || el.offsetHeight > 0) && el.style.display !== 'none'));
+            if (visible.length) visible[0].focus();
+        }, 50);
     }
 
     hide() {
@@ -221,11 +226,11 @@ export class P2PUIManager {
 
     createUI() {
         const template = `
-        <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;">
+        <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2>Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.4.0</span></h2>
-                    <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;">X</button>
+                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.4.0</span></h2>
+                    <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close modal">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
                 
@@ -256,7 +261,7 @@ export class P2PUIManager {
                     </div>
                     
                     <div id="p2p-scanner-container" style="display:none;">
-                        <div id="p2p-reader"></div>
+                        <div id="p2p-reader" aria-label="QR Code Scanner Camera View" role="region"></div>
                         <div class="p2p-paste-section">
                             <input type="text" id="p2p-paste-input" placeholder="Paste raw data or answer link...">
                             <button id="p2p-btn-submit-paste" class="p2p-btn p2p-btn-secondary" style="margin-bottom:0; width:auto;">Submit</button>
@@ -317,6 +322,35 @@ export class P2PUIManager {
     bindEvents() {
         this.ui.btnClose.addEventListener('click', () => this.hide());
         
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this.ui.overlay.style.display !== 'none') {
+                this.hide();
+            }
+        });
+
+        this.ui.overlay.addEventListener('keydown', (e) => {
+            if (e.key === 'Tab') {
+                const focusableElements = this.ui.overlay.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+                const visibleElements = Array.from(focusableElements).filter(el => el.offsetWidth > 0 || el.offsetHeight > 0 || el.getClientRects().length > 0);
+                if (visibleElements.length === 0) return;
+
+                const firstElement = visibleElements[0];
+                const lastElement = visibleElements[visibleElements.length - 1];
+
+                if (e.shiftKey) {
+                    if (document.activeElement === firstElement) {
+                        e.preventDefault();
+                        lastElement.focus();
+                    }
+                } else {
+                    if (document.activeElement === lastElement) {
+                        e.preventDefault();
+                        firstElement.focus();
+                    }
+                }
+            }
+        });
+
         this.peerNode.addEventListener('diagnostic', (e) => this.logDiag(e.detail.type, e.detail.msg));
         
         this.peerNode.addEventListener('status', (e) => {

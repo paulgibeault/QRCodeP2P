@@ -49,7 +49,7 @@ export class P2PAddon extends EventTarget {
 
         await Promise.all([
             loadScript("https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js", "QRCode"),
-            loadScript("https://unpkg.com/html5-qrcode", "Html5QrcodeScanner")
+            loadScript("https://cdnjs.cloudflare.com/ajax/libs/html5-qrcode/2.3.8/html5-qrcode.min.js", "Html5QrcodeScanner")
         ]);
     }
 

@@ -63,6 +63,10 @@ export class PeerManager extends EventTarget {
         
         peerConnection.oniceconnectionstatechange = () => {
             peerData.status = peerConnection.iceConnectionState;
+            if (peerConnection.iceConnectionState === 'failed') {
+                peerConnection.close();
+                this.peers.delete(peerId);
+            }
             this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: peerData.status } }));
         };
 
@@ -159,6 +163,16 @@ export class PeerManager extends EventTarget {
             const offer = await peerData.connection.createOffer();
             await peerData.connection.setLocalDescription(offer);
             await this.waitForIceGathering(peerId);
+            
+            setTimeout(() => {
+                if (peerData.status !== 'connected') {
+                    peerData.connection.close();
+                    this.peers.delete(peerId);
+                    this.dispatchEvent(new CustomEvent('diagnostic', {
+                        detail: { type: 'warn', msg: `Connection attempt to ${peerId} timed out.` }
+                    }));
+                }
+            }, 60000);
             
             return JSON.stringify({
                 peerId: peerId,
