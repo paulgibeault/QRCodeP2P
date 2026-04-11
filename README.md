@@ -77,6 +77,6 @@ To run this project locally, simply clone the repository and serve the files ove
 ```bash
 git clone https://github.com/paulgibeault/QRCodeP2P.git
 cd QRCodeP2P
-python3 -m http.server 8000
+./go
 ```
 Then navigate to `http://localhost:8000` in your browser.
