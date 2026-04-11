@@ -34,7 +34,8 @@ export class P2PUIManager {
         };
 
         // --- Channel 2: localStorage ---
-        window.addEventListener('storage', (e) => {
+        // Store ref so we can removeEventListener in destroy()
+        this._storageListener = (e) => {
             if (e.key === 'p2p-answer-forward' && e.newValue) {
                 try {
                     const data = JSON.parse(e.newValue);
@@ -42,19 +43,28 @@ export class P2PUIManager {
                     this._tryApplyAnswer(data, 'localStorage');
                 } catch(_) {}
             }
-        });
+        };
+        window.addEventListener('storage', this._storageListener);
 
         // --- Channel 3: window.postMessage (host receives answer from joiner tab it opened) ---
-        window.addEventListener('message', (e) => {
+        // Store ref so we can removeEventListener in destroy()
+        this._messageListener = (e) => {
             // Only accept messages from same origin
             if (e.origin !== window.location.origin) return;
             if (e.data && e.data.type === 'p2p-answer') {
                 this._tryApplyAnswer(e.data.payload, 'window.postMessage');
             }
-        });
+        };
+        window.addEventListener('message', this._messageListener);
     }
 
     _tryApplyAnswer(data, source) {
+        try {
+            ConnectionUtils.validatePayload(data);
+        } catch (e) {
+            this.logDiag('warn', `Ignoring malformed answer from ${source}: ${e.message}`);
+            return;
+        }
         if (this.peerNode.peers.has(data.peerId)) {
             this.logDiag('info', `Applying Answer from ${source}.`);
             this.peerNode.acceptAnswer(data);
@@ -88,6 +98,7 @@ export class P2PUIManager {
             this.logDiag('info', `URL ${type} detected. Ingesting...`);
             const decompressed = await ConnectionUtils.decompressData(payload);
             const data = JSON.parse(decompressed);
+            ConnectionUtils.validatePayload(data);
 
             if (type === 'offer') {
                 // -------------------------------------------------------
@@ -521,7 +532,9 @@ export class P2PUIManager {
             try {
                 this.logDiag('info', 'Attempting to unpack pasted string...');
                 const decompressed = await ConnectionUtils.decompressData(text);
-                this.currentScanSuccessCallback(JSON.parse(decompressed));
+                const parsed = JSON.parse(decompressed);
+                ConnectionUtils.validatePayload(parsed);
+                this.currentScanSuccessCallback(parsed);
                 this.ui.pasteInput.value = '';
                 if(this.html5QrcodeScanner) try { this.html5QrcodeScanner.clear(); } catch(e){}
                 this.ui.scannerContainer.style.display = 'none';
@@ -576,6 +589,7 @@ export class P2PUIManager {
             try {
                 const decompressed = await ConnectionUtils.decompressData(decodedText);
                 const data = JSON.parse(decompressed);
+                ConnectionUtils.validatePayload(data);
                 onSuccess(data);
             } catch (e) {
                 this.logDiag('error', `Failed Data Decompression: ${e.message}`);
@@ -600,5 +614,31 @@ export class P2PUIManager {
             this.ui.qrPlaceholder.style.display = 'block';
         }
         if(this.html5QrcodeScanner) { try { this.html5QrcodeScanner.clear(); } catch(e){} }
+    }
+
+    /**
+     * Fully tears down the UI manager: closes BroadcastChannel, removes window
+     * event listeners, stops any active QR scanner, and removes the DOM overlay.
+     * After calling destroy(), this instance should not be reused.
+     */
+    destroy() {
+        // Stop camera / scanner if active
+        if (this.html5QrcodeScanner) {
+            try { this.html5QrcodeScanner.clear(); } catch(_) {}
+            this.html5QrcodeScanner = null;
+        }
+        // Close BroadcastChannel
+        try { this.bc?.close(); } catch(_) {}
+        // Remove window event listeners
+        if (this._storageListener) {
+            window.removeEventListener('storage', this._storageListener);
+            this._storageListener = null;
+        }
+        if (this._messageListener) {
+            window.removeEventListener('message', this._messageListener);
+            this._messageListener = null;
+        }
+        // Remove injected DOM
+        this.ui?.overlay?.remove();
     }
 }
