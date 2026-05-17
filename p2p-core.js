@@ -29,6 +29,30 @@ export class ConnectionUtils {
     }
 
     /**
+     * Strips bulky/unnecessary lines from an SDP string to reduce QR code size.
+     * Specifically filters out mDNS (.local), IPv6, and TCP ICE candidates.
+     */
+    static minifySDP(sdpStr) {
+        const lines = sdpStr.split('\r\n');
+        const minified = lines.filter(line => {
+            if (line.startsWith('a=candidate:')) {
+                // Drop TCP candidates (UDP is preferred for WebRTC data)
+                if (line.includes(' tcp ')) return false;
+                // Drop mDNS candidates (too large, often unroutable across subnets)
+                if (line.includes('.local')) return false;
+                
+                const parts = line.split(' ');
+                // Drop IPv6 candidates (address is part 4, 0-indexed)
+                if (parts.length > 4 && parts[4].includes(':')) return false;
+                
+                return true;
+            }
+            return true;
+        });
+        return minified.join('\r\n');
+    }
+
+    /**
      * Validates that a signaling payload has the expected structure before
      * passing it to WebRTC internals. Throws a descriptive Error on failure.
      * @param {*} data - The deserialized payload object.
@@ -210,9 +234,14 @@ export class PeerManager extends EventTarget {
                 }
             }, 60000);
             
+            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp);
+            
             return JSON.stringify({
                 peerId: peerId,
-                sessionDesc: peerData.connection.localDescription
+                sessionDesc: {
+                    type: peerData.connection.localDescription.type,
+                    sdp: minifiedSDP
+                }
             });
         } catch (e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Offer creation failed: ${e.message}` }}));
@@ -231,9 +260,14 @@ export class PeerManager extends EventTarget {
             await peerData.connection.setLocalDescription(answer);
             await this.waitForIceGathering(hostPeerId);
             
+            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp);
+            
             return JSON.stringify({
                 peerId: hostPeerId,
-                sessionDesc: peerData.connection.localDescription
+                sessionDesc: {
+                    type: peerData.connection.localDescription.type,
+                    sdp: minifiedSDP
+                }
             });
         } catch(e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Answer creation failed: ${e.message}` }}));

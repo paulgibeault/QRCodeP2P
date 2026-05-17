@@ -3,7 +3,7 @@ import { ConnectionUtils } from './p2p-core.js';
 export class P2PUIManager {
     constructor(peerNode) {
         this.peerNode = peerNode;
-        this.html5QrcodeScanner = null;
+        this.html5Qrcode = null;
         this.rawSDPPayload = "";
         this.currentScanSuccessCallback = null;
         
@@ -536,7 +536,9 @@ export class P2PUIManager {
                 ConnectionUtils.validatePayload(parsed);
                 this.currentScanSuccessCallback(parsed);
                 this.ui.pasteInput.value = '';
-                if(this.html5QrcodeScanner) try { this.html5QrcodeScanner.clear(); } catch(e){}
+                if(this.html5Qrcode) {
+                    try { await this.html5Qrcode.stop(); this.html5Qrcode.clear(); } catch(e){}
+                }
                 this.ui.scannerContainer.style.display = 'none';
             } catch (e) {
                 this.logDiag('error', `Paste parsing failed: ${e.message}`);
@@ -573,37 +575,52 @@ export class P2PUIManager {
         this.ui.scannerContainer.style.display = 'block';
         this.currentScanSuccessCallback = onSuccess;
         
-        if (this.html5QrcodeScanner) {
-            try { this.html5QrcodeScanner.clear(); } catch(e){}
+        if (this.html5Qrcode) {
+            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(e){}
         }
         
-        this.html5QrcodeScanner = new Html5QrcodeScanner("p2p-reader", { fps: 10 }, false);
+        this.html5Qrcode = new Html5Qrcode("p2p-reader");
         
         let failureCount = 0;
         
-        this.html5QrcodeScanner.render(async (decodedText, decodedResult) => {
-            try { this.html5QrcodeScanner.clear(); } catch(e){}
-            this.ui.scannerContainer.style.display = 'none';
-            this.logDiag('success', 'QR Code parameters identified! Extracting payload...');
-            
-            try {
-                const decompressed = await ConnectionUtils.decompressData(decodedText);
-                const data = JSON.parse(decompressed);
-                ConnectionUtils.validatePayload(data);
-                onSuccess(data);
-            } catch (e) {
-                this.logDiag('error', `Failed Data Decompression: ${e.message}`);
-                alert("Failed to decode connection data. Check diagnostics panel.");
-                this.cleanupUI();
-                this.startScanner(onSuccess);
-            }
-        }, (err) => {
-            if(err && !err.includes("NotFoundException")) {
-                failureCount++;
-                if(failureCount % 5 === 0) {
-                    this.logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
+        const config = {
+            fps: 10,
+            qrbox: { width: 250, height: 250 },
+            aspectRatio: 1.0
+        };
+
+        this.html5Qrcode.start(
+            { facingMode: "environment" },
+            config,
+            async (decodedText, decodedResult) => {
+                try { await this.html5Qrcode.stop(); this.html5Qrcode.clear(); } catch(e){}
+                this.ui.scannerContainer.style.display = 'none';
+                this.logDiag('success', 'QR Code parameters identified! Extracting payload...');
+                
+                try {
+                    const decompressed = await ConnectionUtils.decompressData(decodedText);
+                    const data = JSON.parse(decompressed);
+                    ConnectionUtils.validatePayload(data);
+                    onSuccess(data);
+                } catch (e) {
+                    this.logDiag('error', `Failed Data Decompression: ${e.message}`);
+                    alert("Failed to decode connection data. Check diagnostics panel.");
+                    this.cleanupUI();
+                    this.startScanner(onSuccess);
+                }
+            },
+            (err) => {
+                if(err && !err.includes("NotFoundException")) {
+                    failureCount++;
+                    if(failureCount % 5 === 0) {
+                        this.logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
+                    }
                 }
             }
+        ).catch(err => {
+            this.logDiag('error', `Camera start failed: ${err}`);
+            alert("Could not start camera. Ensure you have granted permissions and are using HTTPS.");
+            this.cleanupUI();
         });
     }
 
@@ -613,7 +630,9 @@ export class P2PUIManager {
         if(this.ui.qrPlaceholder && this.ui.statusBadge.textContent !== 'CONNECTED') {
             this.ui.qrPlaceholder.style.display = 'block';
         }
-        if(this.html5QrcodeScanner) { try { this.html5QrcodeScanner.clear(); } catch(e){} }
+        if(this.html5Qrcode) { 
+            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(e){} 
+        }
     }
 
     /**
@@ -623,9 +642,9 @@ export class P2PUIManager {
      */
     destroy() {
         // Stop camera / scanner if active
-        if (this.html5QrcodeScanner) {
-            try { this.html5QrcodeScanner.clear(); } catch(_) {}
-            this.html5QrcodeScanner = null;
+        if (this.html5Qrcode) {
+            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(_) {}
+            this.html5Qrcode = null;
         }
         // Close BroadcastChannel
         try { this.bc?.close(); } catch(_) {}
