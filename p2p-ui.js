@@ -30,6 +30,9 @@ export class P2PUIManager {
         this.bc.onmessage = (e) => {
             if (e.data.type === 'answer') {
                 this._tryApplyAnswer(e.data.payload, 'BroadcastChannel');
+            } else if (e.data.type === 'answer-ack') {
+                // The host tab confirmed it applied the answer we relayed.
+                this._onRelayAck();
             }
         };
 
@@ -67,10 +70,92 @@ export class P2PUIManager {
         }
         if (this.peerNode.peers.has(data.peerId)) {
             this.logDiag('info', `Applying Answer from ${source}.`);
+            this._setStage(2, 'done'); // answer received (host)
             this.peerNode.acceptAnswer(data);
+            // Ack back so a relay tab (link tennis) can show "delivered".
+            try { this.bc.postMessage({ type: 'answer-ack', peerId: data.peerId }); } catch(_) {}
         } else {
             this.logDiag('warn', `Answer received via ${source} but peer not found; ignoring.`);
         }
+    }
+
+    // ==========================================
+    // LINK TENNIS — relay tab behavior
+    // The host tapped the joiner's reply link, which opened THIS tab. Forward
+    // the answer to the original host tab and confirm delivery via ack.
+    // ==========================================
+
+    _relayAnswerToHostTab(data) {
+        this.logDiag('info', 'Acting as relay: forwarding answer to your game tab...');
+        this.ui.qrContainer.style.display = 'block';
+        if (this.ui.qrPlaceholder) this.ui.qrPlaceholder.style.display = 'none';
+        this.ui.btnHost.style.display = 'none';
+        this.ui.btnJoin.style.display = 'none';
+        this.ui.btnShareSdp.style.display = 'none';
+        this.ui.btnCopySdp.style.display = 'none';
+        this.ui.qrInstructions.innerHTML =
+            '📨 <strong>Reply received!</strong> Delivering it to your game tab...';
+
+        this._awaitingRelayAck = true;
+
+        // Forward over every same-origin channel; the host tab listens on all.
+        try { this.bc.postMessage({ type: 'answer', payload: data }); } catch(_) {}
+        try { localStorage.setItem('p2p-answer-forward', JSON.stringify(data)); } catch(_) {}
+        try {
+            if (window.opener && !window.opener.closed) {
+                window.opener.postMessage({ type: 'p2p-answer', payload: data }, window.location.origin);
+            }
+        } catch(_) {}
+
+        this._relayAckTimer = setTimeout(() => {
+            if (!this._awaitingRelayAck) return;
+            this._awaitingRelayAck = false;
+            this.ui.qrInstructions.innerHTML =
+                '⚠️ <strong>Could not find your game tab.</strong><br>' +
+                'It may be open in a different browser. Go back to the game tab and use ' +
+                '<em>Scan Answer QR</em> on the joiner\'s screen instead.';
+            this.logDiag('warn', 'No ack from host tab after 5s. Is the game open in a different browser?');
+        }, 5000);
+    }
+
+    _onRelayAck() {
+        if (!this._awaitingRelayAck) return;
+        this._awaitingRelayAck = false;
+        clearTimeout(this._relayAckTimer);
+        this.logDiag('success', 'Host tab confirmed answer delivery.');
+        this.ui.qrInstructions.innerHTML =
+            '✅ <strong>Delivered!</strong> The connection is completing in your game tab. You can close this tab.';
+    }
+
+    // ==========================================
+    // STAGE TRACKER — tiny "connection lab"
+    // A visible checklist of the signaling legs so a failed real-world test
+    // tells you WHICH leg died. Copy Transcript grabs the full diag log.
+    // ==========================================
+
+    _initStages(role) {
+        this._stageLabels = role === 'host'
+            ? ['Offer created', 'Invite sent', 'Answer received', 'Connected']
+            : ['Offer received', 'Answer created', 'Reply sent', 'Connected'];
+        this._stageStates = this._stageLabels.map(() => 'pending');
+        this._renderStages();
+    }
+
+    _setStage(index, state) {
+        if (!this._stageStates || index < 0 || index >= this._stageStates.length) return;
+        this._stageStates[index] = state;
+        this._renderStages();
+    }
+
+    _renderStages() {
+        if (!this.ui.stages || !this._stageLabels) return;
+        this.ui.stages.style.display = 'flex';
+        this.ui.stages.innerHTML = this._stageLabels.map((label, i) => {
+            const state = this._stageStates[i];
+            const icon = state === 'done' ? '✅' : (state === 'error' ? '❌' : '◻️');
+            const cls = `p2p-stage p2p-stage-${state}`;
+            return `<span class="${cls}">${icon} ${label}</span>`;
+        }).join('<span class="p2p-stage-arrow">→</span>');
     }
 
     // ==========================================
@@ -96,9 +181,7 @@ export class P2PUIManager {
     async _ingestURLPayload(payload, type) {
         try {
             this.logDiag('info', `URL ${type} detected. Ingesting...`);
-            const decompressed = await ConnectionUtils.decompressData(payload);
-            const data = JSON.parse(decompressed);
-            ConnectionUtils.validatePayload(data);
+            const data = await ConnectionUtils.decodePayload(payload);
 
             if (type === 'offer') {
                 // -------------------------------------------------------
@@ -113,31 +196,43 @@ export class P2PUIManager {
                 // -------------------------------------------------------
                 this.ui.btnHost.style.display = 'none';
                 this.ui.btnJoin.style.display = 'none';
+                this._initStages('joiner');
+                this._setStage(0, 'done'); // offer received
 
                 this.logDiag('info', 'Computing Answer SDP...');
                 const answerData = await this.peerNode.createAnswer(data);
+                this._setStage(1, 'done'); // answer created
 
-                // Compress answer for QR display
-                const compressed = await ConnectionUtils.compressData(answerData);
-                this.rawSDPPayload = compressed;
+                const encoded = await ConnectionUtils.encodePayload(answerData);
+                this.rawSDPPayload = encoded;
 
-                // PRIMARY path: show answer QR for host to scan
-                this.displayQRCode(answerData,
-                    "📱 Show this QR code to the HOST to scan, OR use the Share button below to send the answer link.");
+                // PRIMARY path: send the reply link back through the same chat
+                // thread the invite arrived on ("link tennis"). QR is secondary.
+                await this.displayQRCode(answerData,
+                    "✅ Answer ready! Tap \"Send reply link\" and send it back in the SAME chat you were invited from. The host taps it — done. (Or the host can scan this QR.)");
+                this.ui.btnShareSdp.textContent = '📤 Send reply link';
 
                 // BONUS path: try all inter-tab channels silently in parallel
                 const answerObj = JSON.parse(answerData);
-                this._attemptAutoReturn(answerObj, compressed);
+                this._attemptAutoReturn(answerObj, encoded);
 
             } else {
                 // -------------------------------------------------------
-                // HOST PATH: This tab received an answer via a share link.
-                // (Rare — usually the answer comes via QR scan or auto-forward.)
+                // HOST RETURN LEG ("link tennis"): this tab was opened by
+                // tapping the joiner's reply link. The live RTCPeerConnection
+                // usually lives in ANOTHER tab (the original host tab), so
+                // this tab acts as a RELAY: forward the answer over every
+                // same-origin channel and wait for the host tab to ack.
                 // -------------------------------------------------------
-                this._tryApplyAnswer(data, 'URL fragment');
-                this.ui.qrContainer.style.display = 'block';
-                this.ui.qrInstructions.innerHTML =
-                    '<strong>Answer received!</strong> Completing connection...';
+                if (this.peerNode.peers.has(data.peerId)) {
+                    // Rare: this very tab holds the pending offer.
+                    this._tryApplyAnswer(data, 'URL fragment');
+                    this.ui.qrContainer.style.display = 'block';
+                    this.ui.qrInstructions.innerHTML =
+                        '<strong>Answer received!</strong> Completing connection...';
+                } else {
+                    this._relayAnswerToHostTab(data);
+                }
             }
         } catch (e) {
             this.logDiag('error', `URL payload ingestion failed: ${e.message}`);
@@ -193,12 +288,12 @@ export class P2PUIManager {
                     url: shareURL,
                 });
                 this.logDiag('success', `Shared ${type} via native share sheet.`);
-                return;
+                return true;
             } catch (e) {
                 if (e.name !== 'AbortError') {
                     this.logDiag('warn', `Native share failed (${e.message}), falling back to clipboard.`);
                 } else {
-                    return; // User cancelled — don't fall through
+                    return false; // User cancelled — don't fall through
                 }
             }
         }
@@ -208,9 +303,11 @@ export class P2PUIManager {
             await navigator.clipboard.writeText(shareURL);
             this.logDiag('success', 'Share URL copied to clipboard!');
             this._showShareFeedback('Link copied! Send it to your opponent.');
+            return true;
         } catch (e) {
             this.logDiag('warn', 'Clipboard unavailable. Showing manual copy prompt.');
             prompt('Copy this link and send it to your opponent:', shareURL);
+            return true;
         }
     }
 
@@ -240,10 +337,11 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.4.0</span></h2>
+                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.5.0</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close modal">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
+                <div id="p2p-stages" style="display:none; flex-wrap:wrap; align-items:center; gap:4px; font-size:11px; color:#aaa; margin:8px 0; padding:6px 8px; background:#181818; border-radius:6px;"></div>
                 
                 <div class="p2p-panels">
                     <div class="p2p-panel">
@@ -261,6 +359,13 @@ export class P2PUIManager {
                 <details class="p2p-advanced-settings" style="margin-bottom:15px; border: 1px solid #404040; border-radius: 8px; padding: 12px; background: #1f1f1f;">
                     <summary style="cursor:pointer; font-weight:600; font-size:13px; color:#aaa; user-select:none;">⚙️ Advanced Connection Settings</summary>
                     <div style="margin-top:10px; display:flex; flex-direction:column; gap:8px; font-size:12px; color:#ddd;">
+                        <label style="display:flex; align-items:center; gap:10px;">
+                            <span>Connection mode:</span>
+                            <select id="p2p-opt-icemode" style="background:#111; color:#fff; border:1px solid #404040; padding:3px 6px; border-radius:4px;">
+                                <option value="anywhere">Anywhere (uses public STUN)</option>
+                                <option value="local">Same Wi-Fi only (zero external servers)</option>
+                            </select>
+                        </label>
                         <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
                             <input type="checkbox" id="p2p-opt-local" checked>
                             Allow Local Candidates (mDNS / same-Wi-Fi)
@@ -295,6 +400,10 @@ export class P2PUIManager {
                             <input type="text" id="p2p-paste-input" placeholder="Paste raw data or answer link...">
                             <button id="p2p-btn-submit-paste" class="p2p-btn p2p-btn-secondary" style="margin-bottom:0; width:auto;">Submit</button>
                         </div>
+                        <label class="p2p-btn p2p-btn-secondary" style="display:inline-block; margin-top:10px; width:auto; cursor:pointer;">
+                            📁 Decode QR from image / screenshot
+                            <input type="file" id="p2p-file-scan" accept="image/*" style="display:none;">
+                        </label>
                         <button id="p2p-btn-cancel-scan" class="p2p-btn p2p-btn-danger" style="margin-top:10px;">Cancel Scan</button>
                     </div>
                     
@@ -304,7 +413,9 @@ export class P2PUIManager {
                 </div>
 
                 <div class="p2p-panel">
-                    <h3 style="margin-top:0; font-size:14px;">Diagnostics</h3>
+                    <h3 style="margin-top:0; font-size:14px;">Diagnostics
+                        <button id="p2p-btn-copy-transcript" class="p2p-btn p2p-text-btn" style="float:right; width:auto; font-size:11px; padding:2px 8px; margin:0;">📋 Copy transcript</button>
+                    </h3>
                     <div id="p2p-diagnostics-out" class="p2p-diagnostics-box" role="log" aria-live="polite">
                         <div class="p2p-diag-info">[SYSTEM] Engine initialized.</div>
                     </div>
@@ -339,13 +450,18 @@ export class P2PUIManager {
             diagnosticsOut: document.getElementById('p2p-diagnostics-out'),
             optLocal: document.getElementById('p2p-opt-local'),
             optIPv6: document.getElementById('p2p-opt-ipv6'),
-            optTimeout: document.getElementById('p2p-opt-timeout')
+            optTimeout: document.getElementById('p2p-opt-timeout'),
+            optIceMode: document.getElementById('p2p-opt-icemode'),
+            stages: document.getElementById('p2p-stages'),
+            fileScan: document.getElementById('p2p-file-scan'),
+            btnCopyTranscript: document.getElementById('p2p-btn-copy-transcript')
         };
-        
+
         // Initialize UI values from PeerManager options
         this.ui.optLocal.checked = this.peerNode.options.allowLocalCandidates;
         this.ui.optIPv6.checked = this.peerNode.options.allowIPv6Candidates;
         this.ui.optTimeout.value = Math.round(this.peerNode.options.connectionTimeoutMs / 60000);
+        this.ui.optIceMode.value = this.peerNode.options.iceMode;
     }
 
     logDiag(type, msg) {
@@ -364,12 +480,57 @@ export class P2PUIManager {
             this.peerNode.options.allowLocalCandidates = this.ui.optLocal.checked;
             this.peerNode.options.allowIPv6Candidates = this.ui.optIPv6.checked;
             this.peerNode.options.connectionTimeoutMs = (parseInt(this.ui.optTimeout.value, 10) || 5) * 60 * 1000;
-            this.logDiag('info', `Settings updated: Local Candidates=${this.peerNode.options.allowLocalCandidates}, IPv6=${this.peerNode.options.allowIPv6Candidates}, Timeout=${this.ui.optTimeout.value}m`);
+            this.peerNode.options.iceMode = this.ui.optIceMode.value === 'local' ? 'local' : 'anywhere';
+            this.logDiag('info', `Settings updated: Mode=${this.peerNode.options.iceMode}, Local Candidates=${this.peerNode.options.allowLocalCandidates}, IPv6=${this.peerNode.options.allowIPv6Candidates}, Timeout=${this.ui.optTimeout.value}m`);
         };
 
         this.ui.optLocal.addEventListener('change', updatePeerNodeOptions);
         this.ui.optIPv6.addEventListener('change', updatePeerNodeOptions);
         this.ui.optTimeout.addEventListener('change', updatePeerNodeOptions);
+        this.ui.optIceMode.addEventListener('change', updatePeerNodeOptions);
+
+        // ---- Copy full diagnostics transcript (for bug reports / remote debugging) ----
+        this.ui.btnCopyTranscript.addEventListener('click', async () => {
+            const lines = Array.from(this.ui.diagnosticsOut.children).map(el => el.textContent);
+            const transcript = [
+                `# P2P transcript ${new Date().toISOString()}`,
+                `# UA: ${navigator.userAgent}`,
+                `# Mode: ${this.peerNode.options.iceMode}, role: ${this.peerNode.isHost ? 'host' : 'joiner'}`,
+                ...lines
+            ].join('\n');
+            try {
+                await navigator.clipboard.writeText(transcript);
+                this._showShareFeedback('Transcript copied.');
+            } catch (_) {
+                prompt('Copy transcript:', transcript);
+            }
+        });
+
+        // ---- Decode a QR from an image file (e.g. a texted screenshot of the answer QR) ----
+        this.ui.fileScan.addEventListener('change', async (e) => {
+            const file = e.target.files && e.target.files[0];
+            e.target.value = ''; // allow re-selecting the same file
+            if (!file || !this.currentScanSuccessCallback) return;
+
+            // The camera scanner and scanFile share the same reader element —
+            // stop the camera before decoding the image.
+            if (this.html5Qrcode && this.html5Qrcode.isScanning) {
+                try { await this.html5Qrcode.stop(); this.html5Qrcode.clear(); } catch(_) {}
+            }
+            if (!this.html5Qrcode) this.html5Qrcode = new Html5Qrcode('p2p-reader');
+
+            try {
+                this.logDiag('info', `Decoding QR from image "${file.name}"...`);
+                const decodedText = await this.html5Qrcode.scanFile(file, false);
+                const data = await ConnectionUtils.decodePayload(decodedText);
+                this.ui.scannerContainer.style.display = 'none';
+                this.logDiag('success', 'QR decoded from image!');
+                this.currentScanSuccessCallback(data);
+            } catch (err) {
+                this.logDiag('error', `Image decode failed: ${err.message || err}`);
+                alert('Could not find a readable QR code in that image.');
+            }
+        });
         
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && this.ui.overlay.style.display !== 'none') {
@@ -412,6 +573,7 @@ export class P2PUIManager {
                 if (connectedCount > 0) {
                     this.ui.statusBadge.textContent = `HOSTING (${connectedCount} PEERS)`;
                     this.ui.statusBadge.className = 'p2p-status-connected';
+                    this._setStage(3, 'done');
                     this.cleanupUI();
                     
                     this.ui.btnHost.style.display = 'none';
@@ -430,6 +592,7 @@ export class P2PUIManager {
                 this.ui.statusBadge.className = '';
                 if (status === 'connected') {
                     this.ui.statusBadge.classList.add('p2p-status-connected');
+                    this._setStage(3, 'done');
                     this.cleanupUI();
                     setTimeout(() => this.hide(), 1500);
                 }
@@ -444,26 +607,23 @@ export class P2PUIManager {
             this.ui.btnHost.style.display = 'none';
             this.ui.btnJoin.style.display = 'none';
             this.ui.btnScanAns.style.display = 'block';
-            
+            this._initStages('host');
+
             try {
                 const offerData = await this.peerNode.createOffer();
+                this._setStage(0, 'done'); // offer created
 
                 // Prefer Share API for offer delivery — resilient across devices
                 if (navigator.share) {
-                    const compressed = await ConnectionUtils.compressData(offerData);
-                    this.rawSDPPayload = compressed;
-                    const fragment = `#p2p-offer=${compressed}`;
-                    const shareURL = window.location.href.split('#')[0] + fragment;
-
-                    this.displayQRCode(offerData,
-                        "📤 Share this invite link with the joiner. After they join, click \"Scan Answer QR\" to scan their screen.");
-
+                    await this.displayQRCode(offerData,
+                        "📤 Share this invite link with the joiner. When they send a reply link back, just tap it — or click \"Scan Answer QR\" to scan their screen.");
                     this.logDiag('info', 'Offer ready. Share link generated.');
                 } else {
                     // No Share API (desktop) — show QR for joiner to scan
-                    this.displayQRCode(offerData, "Step 1: Have JOINER scan this QR code.");
+                    await this.displayQRCode(offerData, "Step 1: Have JOINER scan this QR code.");
                 }
             } catch (e) {
+                this._setStage(0, 'error');
                 this.logDiag('error', 'Critical failure generating Host Offer.');
             }
         });
@@ -486,6 +646,7 @@ export class P2PUIManager {
             this.logDiag('info', 'Opening scanner for Answer QR...');
             this.startScanner(async (answerData) => {
                 this.logDiag('info', 'Applying Answer...');
+                this._setStage(2, 'done'); // answer received
                 await this.peerNode.acceptAnswer(answerData);
             });
         });
@@ -495,21 +656,25 @@ export class P2PUIManager {
             this.logDiag('info', '--- JOIN SEQUENCE ---');
             this.ui.btnHost.style.display = 'none';
             this.ui.btnJoin.style.display = 'none';
-            
+            this._initStages('joiner');
+
             this.startScanner(async (offerData) => {
                 this.logDiag('info', 'Ingested Offer. Computing Answer SDP...');
+                this._setStage(0, 'done'); // offer received
                 try {
                     const answerData = await this.peerNode.createAnswer(offerData);
+                    this._setStage(1, 'done'); // answer created
 
                     // Show QR for host to scan — universal and reliable
-                    this.displayQRCode(answerData,
-                        "📱 Show this QR to the HOST to scan. Or use Share/Copy to send them the link.");
+                    await this.displayQRCode(answerData,
+                        "📱 Show this QR to the HOST to scan. Or use Share/Copy to send them the reply link.");
 
                     // Also attempt auto-forwarding via all inter-tab channels
-                    const compressed = this.rawSDPPayload; // set by displayQRCode
+                    const encoded = this.rawSDPPayload; // set by displayQRCode
                     const answerObj = JSON.parse(answerData);
-                    this._attemptAutoReturn(answerObj, compressed);
+                    this._attemptAutoReturn(answerObj, encoded);
                 } catch (e) {
+                    this._setStage(1, 'error');
                     this.logDiag('error', 'Critical failure computing Joiner Answer.');
                 }
             });
@@ -541,9 +706,13 @@ export class P2PUIManager {
         this.ui.btnShareSdp.addEventListener('click', async () => {
             const type = this.peerNode.isHost ? 'offer' : 'answer';
             const instructions = type === 'offer'
-                ? 'Open this link to join my game! After joining, share your answer QR with me.'
-                : 'Open this link to complete the connection.';
-            await this._shareOrCopy(this.rawSDPPayload, type, instructions);
+                ? 'Open this link to join my game! After joining, tap "Send reply link" and send it back to me here.'
+                : 'Tap this link to complete the connection.';
+            const shared = await this._shareOrCopy(this.rawSDPPayload, type, instructions);
+            if (shared) {
+                // host stage 1 = "Invite sent"; joiner stage 2 = "Reply sent"
+                this._setStage(this.peerNode.isHost ? 1 : 2, 'done');
+            }
         });
 
         this.ui.btnCopySdp.addEventListener('click', async () => {
@@ -569,9 +738,7 @@ export class P2PUIManager {
             
             try {
                 this.logDiag('info', 'Attempting to unpack pasted string...');
-                const decompressed = await ConnectionUtils.decompressData(text);
-                const parsed = JSON.parse(decompressed);
-                ConnectionUtils.validatePayload(parsed);
+                const parsed = await ConnectionUtils.decodePayload(text);
                 this.currentScanSuccessCallback(parsed);
                 this.ui.pasteInput.value = '';
                 if(this.html5Qrcode && this.html5Qrcode.isScanning) {
@@ -590,17 +757,19 @@ export class P2PUIManager {
         this.ui.qrContainer.style.display = 'block';
         this.ui.qrInstructions.textContent = instructions;
         
-        this.logDiag('info', 'Compressing SDP payload...');
-        this.rawSDPPayload = await ConnectionUtils.compressData(dataStr);
-        this.logDiag('success', `Payload compressed to ${this.rawSDPPayload.length} chars`);
-        
+        this.logDiag('info', 'Packing SDP payload...');
+        this.rawSDPPayload = await ConnectionUtils.encodePayload(dataStr);
+        this.logDiag('success', `Payload packed to ${this.rawSDPPayload.length} chars`);
+
         try {
             this.ui.qrCanvas.innerHTML = '';
             new QRCode(this.ui.qrCanvas, {
                 text: this.rawSDPPayload,
                 width: 256,
                 height: 256,
-                correctLevel: QRCode.CorrectLevel.L
+                // Packed payloads are tiny (~130-180 chars), so we can afford
+                // medium error correction for far more forgiving scans.
+                correctLevel: QRCode.CorrectLevel.M
             });
         } catch(e) {
             this.logDiag('error', `QR Canvas err: ${e.message}`);
@@ -640,14 +809,12 @@ export class P2PUIManager {
             }
             this.ui.scannerContainer.style.display = 'none';
             this.logDiag('success', 'QR Code parameters identified! Extracting payload...');
-            
+
             try {
-                const decompressed = await ConnectionUtils.decompressData(decodedText);
-                const data = JSON.parse(decompressed);
-                ConnectionUtils.validatePayload(data);
+                const data = await ConnectionUtils.decodePayload(decodedText);
                 onSuccess(data);
             } catch (e) {
-                this.logDiag('error', `Failed Data Decompression: ${e.message}`);
+                this.logDiag('error', `Failed payload decode: ${e.message}`);
                 alert("Failed to decode connection data. Check diagnostics panel.");
                 this.cleanupUI();
                 this.startScanner(onSuccess);
@@ -714,6 +881,8 @@ export class P2PUIManager {
             } catch(_) {}
             this.html5Qrcode = null;
         }
+        // Cancel any pending relay-ack timeout
+        clearTimeout(this._relayAckTimer);
         // Close BroadcastChannel
         try { this.bc?.close(); } catch(_) {}
         // Remove window event listeners

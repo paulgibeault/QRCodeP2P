@@ -319,3 +319,10 @@ details[open] summary {
     height: 15px;
     cursor: pointer;
 }
+
+/* ---- v1.5.0: stage tracker (mini connection lab) ---- */
+.p2p-stage { padding: 2px 6px; border-radius: 4px; background: #222; white-space: nowrap; }
+.p2p-stage-done { color: #4ade80; }
+.p2p-stage-pending { color: #777; }
+.p2p-stage-error { color: #f87171; }
+.p2p-stage-arrow { color: #555; }

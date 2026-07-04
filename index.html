@@ -9,7 +9,7 @@
 <body>
 <div class="container">
     <header>
-        <h1>QR-Code P2P Connect <span style="font-size:0.5em; color:#888; vertical-align:middle; font-weight:normal; margin-left:10px;">v1.4.0</span></h1>
+        <h1>QR-Code P2P Connect <span style="font-size:0.5em; color:#888; vertical-align:middle; font-weight:normal; margin-left:10px;">v1.5.0</span></h1>
         <p>Establish a WebRTC connection with no signaling server!</p>
         <div id="connection-status" class="status-disconnected">Disconnected</div>
     </header>
@@ -61,6 +61,7 @@
 
     const mp = new P2PAddon();
     await mp.init();
+    window.__mp = mp; // exposed for automated e2e tests
 
     // Open connection menu
     document.getElementById('btn-multiplayer').addEventListener('click', () => mp.showUI());
