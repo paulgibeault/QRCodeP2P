@@ -236,6 +236,7 @@ export class P2PUIManager {
             }
         } catch (e) {
             this.logDiag('error', `URL payload ingestion failed: ${e.message}`);
+            this.logDiag('warn', 'If the link came from a device running a different app version, reload the page on BOTH devices and re-share the link.');
         }
     }
 
@@ -747,6 +748,7 @@ export class P2PUIManager {
                 this.ui.scannerContainer.style.display = 'none';
             } catch (e) {
                 this.logDiag('error', `Paste parsing failed: ${e.message}`);
+                this.logDiag('warn', 'If the data came from a device showing a different version in its header, reload the page on BOTH devices and try again.');
             }
         });
     }
@@ -815,7 +817,8 @@ export class P2PUIManager {
                 onSuccess(data);
             } catch (e) {
                 this.logDiag('error', `Failed payload decode: ${e.message}`);
-                alert("Failed to decode connection data. Check diagnostics panel.");
+                this.logDiag('warn', 'If the other device shows a different version in its header, reload the page on BOTH devices and try again.');
+                alert("Failed to decode connection data.\n\nMost common cause: the two devices are running different app versions. Reload the page on both devices (check the version number in the header matches), then retry.");
                 this.cleanupUI();
                 this.startScanner(onSuccess);
             }
