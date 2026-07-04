@@ -142,6 +142,54 @@ test('core: packed offer/answer handshake connects two real peers', async () => 
 
 // ---------------------------------------------------------------------------
 
+// REGRESSION (field test 2026-07-04): the host's ICE agent answers
+// connectivity checks BEFORE it has received the answer, so the joiner's ICE
+// reaches 'connected' mid-ceremony. v1.5.0 reported that as fully connected,
+// hid the answer QR, and stranded the host. App-level 'connected' must mean
+// the data channel is open; pre-answer ICE-connected must surface as
+// 'finalizing'.
+test('joiner must not report connected before host applies the answer', async () => {
+    const host = await newHarnessPage();
+    const joiner = await newHarnessPage();
+
+    const packedOffer = await host.evaluate(async () => {
+        window.pm = new PeerManager({ iceMode: 'local' });
+        return await ConnectionUtils.encodePayload(await pm.createOffer());
+    });
+
+    const packedAnswer = await joiner.evaluate(async (packed) => {
+        window.pm = new PeerManager({ iceMode: 'local' });
+        window.__statuses = [];
+        pm.addEventListener('status', e => __statuses.push(e.detail.status));
+        const offerPayload = await ConnectionUtils.decodePayload(packed);
+        return await ConnectionUtils.encodePayload(await pm.createAnswer(offerPayload));
+    }, packedOffer);
+
+    // Host does NOT apply the answer yet — the kitchen-table window.
+    // The joiner's ICE should still connect (host answers checks pre-answer),
+    // which must surface as 'finalizing', never 'connected'.
+    await joiner.waitForFunction(`__statuses.includes('finalizing')`, null, { timeout: 15000 });
+    const leaked = await joiner.evaluate(() => __statuses.includes('connected'));
+    assert.equal(leaked, false, "joiner must NOT report 'connected' while the host lacks the answer");
+    console.log('  ✓ joiner correctly reports finalizing (not connected) pre-answer');
+
+    // Now complete the ceremony — both sides must reach real connected.
+    await host.evaluate(async (packed) => {
+        await pm.acceptAnswer(await ConnectionUtils.decodePayload(packed));
+    }, packedAnswer);
+    await joiner.waitForFunction(`__statuses.includes('connected')`, null, { timeout: 15000 });
+    await host.waitForFunction(
+        `Array.from(pm.peers.values()).some(p => p.status === 'connected')`,
+        null, { timeout: 15000 }
+    );
+    console.log('  ✓ both sides reach real connected once the answer is applied');
+
+    await host.close();
+    await joiner.close();
+});
+
+// ---------------------------------------------------------------------------
+
 test('backward compat: legacy deflate payloads still decode', async () => {
     const page = await newHarnessPage();
     const result = await page.evaluate(async () => {

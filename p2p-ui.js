@@ -338,7 +338,7 @@ export class P2PUIManager {
         <div id="p2p-modal-overlay" class="p2p-modal-overlay" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="p2p-modal-title">
             <div class="p2p-modal">
                 <header class="p2p-header">
-                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.5.0</span></h2>
+                    <h2 id="p2p-modal-title">Multiplayer Connection <span style="font-size: 0.5em; color: #888; vertical-align: middle; font-weight: normal; margin-left: 10px;">v1.5.1</span></h2>
                     <button id="p2p-btn-close" class="p2p-btn-danger" style="border:none; border-radius:4px; padding:4px 8px; cursor:pointer;" aria-label="Close modal">X</button>
                 </header>
                 <div id="p2p-status-badge" class="p2p-status-disconnected">DISCONNECTED</div>
@@ -597,7 +597,14 @@ export class P2PUIManager {
                     this.cleanupUI();
                     setTimeout(() => this.hide(), 1500);
                 }
-                else if (status === 'disconnected') this.ui.statusBadge.classList.add('p2p-status-disconnected');
+                else if (status === 'finalizing') {
+                    // ICE path is up but the host hasn't applied our answer yet.
+                    // Keep the answer QR / reply-link UI fully visible — the
+                    // ceremony is NOT done until the data channel opens.
+                    this.ui.statusBadge.textContent = 'ALMOST THERE — HOST NEEDS YOUR ANSWER';
+                    this.ui.statusBadge.classList.add('p2p-status-connecting');
+                }
+                else if (status === 'disconnected' || status === 'failed') this.ui.statusBadge.classList.add('p2p-status-disconnected');
                 else this.ui.statusBadge.classList.add('p2p-status-connecting');
             }
         });

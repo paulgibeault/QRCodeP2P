@@ -177,12 +177,33 @@ export class PeerManager extends EventTarget {
         this.peers.set(peerId, peerData);
         
         peerConnection.oniceconnectionstatechange = () => {
-            peerData.status = peerConnection.iceConnectionState;
-            if (peerConnection.iceConnectionState === 'failed') {
+            const iceState = peerConnection.iceConnectionState;
+            if (iceState === 'failed') {
                 peerConnection.close();
                 this.peers.delete(peerId);
+                this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: 'failed' } }));
+                return;
             }
-            this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: peerData.status } }));
+            // FIELD-TEST LESSON (2026-07-04): ICE can reach 'connected' on the
+            // JOINER before the host has even received the answer — the host's
+            // ICE agent answers connectivity checks pre-answer. Reporting that
+            // as "connected" hid the answer QR mid-ceremony and stranded the
+            // host. App-level 'connected' therefore requires the DATA CHANNEL
+            // to be open; until then ICE-connected surfaces as 'finalizing'.
+            let status = iceState;
+            if (iceState === 'connected' || iceState === 'completed') {
+                const channelOpen = peerData.dataChannel && peerData.dataChannel.readyState === 'open';
+                status = channelOpen ? 'connected' : 'finalizing';
+                if (status === 'finalizing' && !peerData._finalizingLogged) {
+                    peerData._finalizingLogged = true;
+                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                        type: 'info',
+                        msg: `Network path to ${peerId} established — waiting for the secure channel. If you are the JOINER, the host still needs your answer (reply link or QR).`
+                    }}));
+                }
+            }
+            peerData.status = status;
+            this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status } }));
         };
 
         peerConnection.onicecandidate = (event) => {
@@ -215,12 +236,16 @@ export class PeerManager extends EventTarget {
         
         peerData.dataChannel = channel;
         peerData.dataChannel.onopen = () => {
+            // The data channel opening is the ONLY thing that means "connected".
+            peerData.status = 'connected';
+            this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: 'connected' } }));
             this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: true } }));
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: `Data channel OPEN with ${peerId}!` }}));
         };
         peerData.dataChannel.onclose = () => {
             this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: false } }));
             this.peers.delete(peerId);
+            this.dispatchEvent(new CustomEvent('status', { detail: { peerId, status: 'disconnected' } }));
         };
         peerData.dataChannel.onmessage = (event) => {
             let data = event.data;

@@ -178,6 +178,49 @@ iMessage/SMS intact.
 | `index.html` | v1.5.0, exposes `window.__mp` for tests |
 | `test/` | **new** — codec unit tests, 2-page + 3-tab e2e, cross-engine matrix |
 
+## Field test #1 (2026-07-04, iPhone Safari host ↔ Mac Safari joiner) — v1.5.1
+
+The first kitchen-table test failed exactly the way the stage tracker was
+built to catch, and produced a fix within the hour:
+
+**Symptom:** Joiner (Mac) showed "✅ Connected" 14s after scanning the offer
+QR, modal auto-closed (hiding the answer QR!), then "Cannot send, no channels
+open". Host (iPhone) stuck at `Answer received ◻️`, status CONNECTING forever.
+
+**Root cause:** WebRTC's ICE agent answers connectivity checks *before* the
+answer SDP is applied — the joiner knows the host's ICE credentials from the
+offer, so its checks succeed and its `iceConnectionState` hits `connected`
+while the host still has nothing. v1.5.0 treated ICE-connected as
+fully-connected: it dismissed the joiner UI mid-ceremony (destroying the
+answer QR the host still needed) and enabled chat on a channel that could
+never open (DTLS can't complete until the host applies the answer).
+
+**Why automated tests missed it:** both sides always applied their SDPs
+within milliseconds, so ICE-connected and channel-open were effectively
+simultaneous. The bug only lives in the asymmetric window where the answer
+hasn't returned — which is the *normal* state of a real-world ceremony.
+
+**Fix (v1.5.1):** app-level `connected` now requires the data channel to be
+OPEN. Pre-answer ICE-connected surfaces as a new `finalizing` status: joiner
+badge reads "ALMOST THERE — HOST NEEDS YOUR ANSWER", the answer QR / reply
+link stays visible, and a diagnostic explains what's still missing. The data
+channel's `onopen` is the single source of truth for connected (and `onclose`
+for disconnected). Regression test added: joiner must report `finalizing`,
+never `connected`, while the host lacks the answer; both sides must reach
+real `connected` after it's applied.
+
+**Also observed in the field (good news):**
+- Packed payloads: 137 chars (iPhone offer), 121 chars (Mac answer) — matches
+  the automated matrix.
+- Mac Safari gathered a REAL host candidate (10.0.0.98) because the QR
+  scanner's camera grant unlocks host candidates — the Safari behavior the
+  matrix predicted, working in our favor exactly as designed.
+- iPhone host candidates were mDNS-obfuscated (no camera grant on the host
+  yet at offer time) + srflx via STUN — connection still viable via
+  peer-reflexive discovery once the answer lands.
+- Webcam QR scan of a phone screen took ~7s of failed frames before locking —
+  usable, but worth trying larger on-screen QR / higher contrast later.
+
 ### Next steps (not in this POC)
 
 - Real-device kitchen-table test: iPhone Safari joiner ↔ Mac Chrome host via
