@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"><title>P2P Core Test Harness</title></head>
+<body>
+<!-- Minimal page exposing the core (no UI, no CDN deps) for automated tests -->
+<script type="module">
+    import { PeerManager, ConnectionUtils } from '../p2p-core.js';
+    import { SDPCodec } from '../sdp-codec.js';
+    window.PeerManager = PeerManager;
+    window.ConnectionUtils = ConnectionUtils;
+    window.SDPCodec = SDPCodec;
+    window.__ready = true;
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+{
+  "name": "qrcodep2p-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:unit": "node --test codec.test.mjs",
+    "test:e2e": "node --test e2e.test.mjs",
+    "test": "node --test codec.test.mjs e2e.test.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.49.0"
+  }
+}

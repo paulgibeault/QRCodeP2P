@@ -10,32 +10,49 @@ Establish a WebRTC connection with no signaling server! This project demonstrate
 - **Cross-Device**: Works seamlessly between laptops, phones, and tablets.
 - **Real-Time Data Channel**: Once connected, you can use the Test Bed Console to send real-time chat messages directly from device to device.
 
-## How it Works (v1.4.0 — Hybrid Signaling)
+## How it Works (v1.5.0 — Packed Payloads & Link Tennis)
 
-Because WebRTC requires devices to explicitly agree on connection parameters before opening a peer-to-peer connection, we use a **hybrid signaling strategy** that is both resilient to transmit _and_ reliable to receive:
+Because WebRTC requires devices to explicitly agree on connection parameters before opening a peer-to-peer connection, the two artifacts (offer and answer) must each make one hop between the devices. v1.5.0 makes each hop tiny and frictionless:
 
-### Leg 1 — Offer: Host → Joiner (resilient transmission)
-1. **The Host** clicks **Host** and the offer SDP is generated.
-2. On mobile, the native **Share Sheet** is used to send a URL containing the offer (iMessage, WhatsApp, etc.). On desktop (no Share API), a QR code is displayed instead.
-3. The joiner taps the link / scans the QR. The page opens and **auto-ingests the offer**.
+### Binary template packing (`sdp-codec.js`)
+Instead of compressing SDP text, we transmit only its real entropy — ICE credentials, DTLS fingerprint, and candidates — as a ~**112-153 character** string (was ~600+), and rebuild the full SDP from a template on the receiving side. QR codes are now small enough to scan instantly, and links survive SMS/iMessage intact. Legacy v1.4 payloads still decode.
 
-### Leg 2 — Answer: Joiner → Host (reliable return)
-4. The joiner's page **generates the answer and displays it as a QR code**. This is the universal path — no cross-tab or cross-browser forwarding required.
-5. The host clicks **"📷 Scan Answer QR"** to scan the joiner's screen. The answer is applied directly to the original host tab.
+### Leg 1 — Offer: Host → Joiner
+1. **The Host** clicks **Host**; the packed offer is generated.
+2. On mobile, the native **Share Sheet** sends an invite URL (iMessage, WhatsApp, etc.). On desktop, a QR code is displayed instead.
+3. The joiner taps the link / scans the QR; the page **auto-ingests the offer**.
 
-### Auto-Connect Bonus
-When the joiner's page is in the same browser as the host (e.g., same Safari session), the answer is also silently forwarded via three parallel channels — **BroadcastChannel**, **localStorage**, and **window.opener.postMessage** — so the connection may complete without the host needing to scan at all.
+### Leg 2 — Answer: Joiner → Host ("link tennis")
+4. The joiner's page generates the answer and offers **"Send reply link"** — the answer travels back through the *same chat thread* the invite came from.
+5. The host taps the reply link. It opens a small **relay tab** that forwards the answer to the original game tab (BroadcastChannel / localStorage / opener), waits for the game tab's ack, and shows "✅ Delivered — close this tab".
+6. Universal fallbacks, in order of reach: the host **scans the joiner's answer QR**, decodes a **texted screenshot** of it (📁 Decode from image), or pastes the raw string.
 
 ```
-HOST TAB                    JOINER DEVICE
-  |── Share URL (offer) ─────────>|  (tap link → page auto-ingests offer)
-  |                               |  (generates answer QR)
-  |<── HOST scans joiner's QR ───|
-  |  (host tab applies answer)    |
+HOST TAB                        JOINER DEVICE
+  |── invite link (offer) ──────────>|  tap → auto-ingest → answer ready
+  |<───── reply link (answer) ───────|  sent back through the same chat
+  | (relay tab → BroadcastChannel →  |
+  |  game tab applies answer + acks) |
   ════════ CONNECTION ESTABLISHED ════════
 ```
 
-Everything happens securely and locally after the initial exchange.
+### Connection modes
+- **Anywhere** (default): uses public STUN — no data or signaling ever transits it; it only reflects your public IP. Required for Safari joiners that never grant camera access (Safari withholds ICE candidates without device permission).
+- **Same Wi-Fi only**: zero external servers of any kind. Works LAN-only; on Safari this mode needs the QR flow (its camera grant unlocks host candidates).
+
+A stage tracker in the connection modal shows exactly which leg of the exchange succeeded or died, and **📋 Copy transcript** exports the diagnostics for remote debugging.
+
+Everything happens securely and locally after the initial exchange. See [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for the wire format, the cross-browser test matrix, and known limits.
+
+## Running the tests
+
+```bash
+cd test
+npm install                              # Playwright library (uses your installed Chrome)
+npx playwright install firefox webkit    # for the cross-engine matrix
+npm test                                 # codec unit tests + 2-page/3-tab e2e
+node --test cross-engine.test.mjs        # chrome/firefox/webkit matrix
+```
 
 ## Integration into Single-Page Games
 
