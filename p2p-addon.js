@@ -2,10 +2,11 @@ import { PeerManager } from './p2p-core.js';
 import { P2PUIManager } from './p2p-ui.js';
 
 export class P2PAddon extends EventTarget {
-    constructor() {
+    constructor(options = {}) {
         super();
-        this.peerNode = new PeerManager();
+        this.peerNode = new PeerManager(options);
         this.ui = null;
+        this.options = options;
         
         // Proxy events
         this.peerNode.addEventListener('message', (e) => {

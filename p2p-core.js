@@ -1,8 +1,9 @@
 const STUN_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
-        // for reliability, we normally would add a turn server here
-        // { urls: 'turn:YOUR_TURN_SERVER', username: 'u', credential: 'c' }
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.services.mozilla.com' }
     ]
 };
 
@@ -14,12 +15,28 @@ export class ConnectionUtils {
         const stream = new Blob([dataStr], {type: 'application/json'}).stream().pipeThrough(new CompressionStream('deflate-raw'));
         const blob = await new Response(stream).blob();
         const buffer = await blob.arrayBuffer();
-        return btoa(String.fromCharCode(...new Uint8Array(buffer)));
+        
+        // Robust Uint8Array to base64 conversion that avoids call stack limits
+        let binary = '';
+        const bytes = new Uint8Array(buffer);
+        const len = bytes.byteLength;
+        for (let i = 0; i < len; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        const b64 = btoa(binary);
+        
+        // Convert standard base64 to base64url (URL-Safe)
+        return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
     }
 
     static async decompressData(b64Str) {
         try {
-            const bytes = Uint8Array.from(atob(b64Str), c => c.charCodeAt(0));
+            // Convert URL-safe base64url back to standard base64
+            let standardB64 = b64Str.replace(/-/g, '+').replace(/_/g, '/');
+            while (standardB64.length % 4) {
+                standardB64 += '=';
+            }
+            const bytes = Uint8Array.from(atob(standardB64), c => c.charCodeAt(0));
             const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
             const blob = await new Response(stream).blob();
             return await blob.text();
@@ -30,20 +47,23 @@ export class ConnectionUtils {
 
     /**
      * Strips bulky/unnecessary lines from an SDP string to reduce QR code size.
-     * Specifically filters out mDNS (.local), IPv6, and TCP ICE candidates.
+     * Specifically filters out TCP candidates and optionally mDNS (.local) and IPv6 based on options.
      */
-    static minifySDP(sdpStr) {
+    static minifySDP(sdpStr, options = {}) {
+        const allowLocal = options.allowLocalCandidates !== false;
+        const allowIPv6 = options.allowIPv6Candidates !== false;
         const lines = sdpStr.split('\r\n');
         const minified = lines.filter(line => {
             if (line.startsWith('a=candidate:')) {
                 // Drop TCP candidates (UDP is preferred for WebRTC data)
                 if (line.includes(' tcp ')) return false;
-                // Drop mDNS candidates (too large, often unroutable across subnets)
-                if (line.includes('.local')) return false;
+                
+                // Drop mDNS candidates if not allowed
+                if (!allowLocal && line.includes('.local')) return false;
                 
                 const parts = line.split(' ');
-                // Drop IPv6 candidates (address is part 4, 0-indexed)
-                if (parts.length > 4 && parts[4].includes(':')) return false;
+                // Drop IPv6 candidates if not allowed (address is part 4, 0-indexed)
+                if (!allowIPv6 && parts.length > 4 && parts[4].includes(':')) return false;
                 
                 return true;
             }
@@ -79,11 +99,18 @@ export class ConnectionUtils {
 // CORE: WebRTC Manager
 // ==========================================
 export class PeerManager extends EventTarget {
-    constructor() {
+    constructor(options = {}) {
         super();
         this.peers = new Map();
         this.isHost = false;
         this.myId = this.generateId();
+        
+        // Configuration options
+        this.options = {
+            allowLocalCandidates: options.allowLocalCandidates !== false,
+            allowIPv6Candidates: options.allowIPv6Candidates !== false,
+            connectionTimeoutMs: options.connectionTimeoutMs || 300000 // 5 minutes default
+        };
     }
 
     generateId() {
@@ -232,9 +259,9 @@ export class PeerManager extends EventTarget {
                         detail: { type: 'warn', msg: `Connection attempt to ${peerId} timed out.` }
                     }));
                 }
-            }, 60000);
+            }, this.options.connectionTimeoutMs);
             
-            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp);
+            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp, this.options);
             
             return JSON.stringify({
                 peerId: peerId,
@@ -260,7 +287,7 @@ export class PeerManager extends EventTarget {
             await peerData.connection.setLocalDescription(answer);
             await this.waitForIceGathering(hostPeerId);
             
-            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp);
+            const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp, this.options);
             
             return JSON.stringify({
                 peerId: hostPeerId,

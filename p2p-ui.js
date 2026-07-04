@@ -258,6 +258,24 @@ export class P2PUIManager {
                     </div>
                 </div>
 
+                <details class="p2p-advanced-settings" style="margin-bottom:15px; border: 1px solid #404040; border-radius: 8px; padding: 12px; background: #1f1f1f;">
+                    <summary style="cursor:pointer; font-weight:600; font-size:13px; color:#aaa; user-select:none;">⚙️ Advanced Connection Settings</summary>
+                    <div style="margin-top:10px; display:flex; flex-direction:column; gap:8px; font-size:12px; color:#ddd;">
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="p2p-opt-local" checked>
+                            Allow Local Candidates (mDNS / same-Wi-Fi)
+                        </label>
+                        <label style="display:flex; align-items:center; gap:8px; cursor:pointer;">
+                            <input type="checkbox" id="p2p-opt-ipv6" checked>
+                            Allow IPv6 Candidates (cellular networks)
+                        </label>
+                        <div style="display:flex; align-items:center; gap:10px;">
+                            <span>Timeout (minutes):</span>
+                            <input type="number" id="p2p-opt-timeout" value="5" min="1" max="30" style="width:50px; background:#111; color:#fff; border:1px solid #404040; padding:2px; border-radius:4px; text-align:center;">
+                        </div>
+                    </div>
+                </details>
+
                 <div class="p2p-panel" style="margin-bottom: 15px;">
                     <div id="p2p-qr-container" style="display:none; text-align:center;">
                         <p id="p2p-qr-instructions"></p>
@@ -318,8 +336,16 @@ export class P2PUIManager {
             pasteInput: document.getElementById('p2p-paste-input'),
             btnSubmitPaste: document.getElementById('p2p-btn-submit-paste'),
             qrPlaceholder: document.getElementById('p2p-qr-placeholder'),
-            diagnosticsOut: document.getElementById('p2p-diagnostics-out')
+            diagnosticsOut: document.getElementById('p2p-diagnostics-out'),
+            optLocal: document.getElementById('p2p-opt-local'),
+            optIPv6: document.getElementById('p2p-opt-ipv6'),
+            optTimeout: document.getElementById('p2p-opt-timeout')
         };
+        
+        // Initialize UI values from PeerManager options
+        this.ui.optLocal.checked = this.peerNode.options.allowLocalCandidates;
+        this.ui.optIPv6.checked = this.peerNode.options.allowIPv6Candidates;
+        this.ui.optTimeout.value = Math.round(this.peerNode.options.connectionTimeoutMs / 60000);
     }
 
     logDiag(type, msg) {
@@ -332,6 +358,18 @@ export class P2PUIManager {
 
     bindEvents() {
         this.ui.btnClose.addEventListener('click', () => this.hide());
+        
+        // Configurable options binders
+        const updatePeerNodeOptions = () => {
+            this.peerNode.options.allowLocalCandidates = this.ui.optLocal.checked;
+            this.peerNode.options.allowIPv6Candidates = this.ui.optIPv6.checked;
+            this.peerNode.options.connectionTimeoutMs = (parseInt(this.ui.optTimeout.value, 10) || 5) * 60 * 1000;
+            this.logDiag('info', `Settings updated: Local Candidates=${this.peerNode.options.allowLocalCandidates}, IPv6=${this.peerNode.options.allowIPv6Candidates}, Timeout=${this.ui.optTimeout.value}m`);
+        };
+
+        this.ui.optLocal.addEventListener('change', updatePeerNodeOptions);
+        this.ui.optIPv6.addEventListener('change', updatePeerNodeOptions);
+        this.ui.optTimeout.addEventListener('change', updatePeerNodeOptions);
         
         document.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && this.ui.overlay.style.display !== 'none') {
@@ -536,7 +574,7 @@ export class P2PUIManager {
                 ConnectionUtils.validatePayload(parsed);
                 this.currentScanSuccessCallback(parsed);
                 this.ui.pasteInput.value = '';
-                if(this.html5Qrcode) {
+                if(this.html5Qrcode && this.html5Qrcode.isScanning) {
                     try { await this.html5Qrcode.stop(); this.html5Qrcode.clear(); } catch(e){}
                 }
                 this.ui.scannerContainer.style.display = 'none';
@@ -575,8 +613,12 @@ export class P2PUIManager {
         this.ui.scannerContainer.style.display = 'block';
         this.currentScanSuccessCallback = onSuccess;
         
-        if (this.html5Qrcode) {
-            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(e){}
+        if (this.html5Qrcode && this.html5Qrcode.isScanning) {
+            try { 
+                this.html5Qrcode.stop().then(() => {
+                    try { this.html5Qrcode.clear(); } catch(_) {}
+                }).catch(() => {});
+            } catch(e){}
         }
         
         this.html5Qrcode = new Html5Qrcode("p2p-reader");
@@ -589,35 +631,53 @@ export class P2PUIManager {
             aspectRatio: 1.0
         };
 
+        const onScanSuccess = async (decodedText, decodedResult) => {
+            if (this.html5Qrcode && this.html5Qrcode.isScanning) {
+                try { 
+                    await this.html5Qrcode.stop(); 
+                    this.html5Qrcode.clear(); 
+                } catch(e){}
+            }
+            this.ui.scannerContainer.style.display = 'none';
+            this.logDiag('success', 'QR Code parameters identified! Extracting payload...');
+            
+            try {
+                const decompressed = await ConnectionUtils.decompressData(decodedText);
+                const data = JSON.parse(decompressed);
+                ConnectionUtils.validatePayload(data);
+                onSuccess(data);
+            } catch (e) {
+                this.logDiag('error', `Failed Data Decompression: ${e.message}`);
+                alert("Failed to decode connection data. Check diagnostics panel.");
+                this.cleanupUI();
+                this.startScanner(onSuccess);
+            }
+        };
+
+        const onScanFailure = (err) => {
+            if(err && !err.includes("NotFoundException")) {
+                failureCount++;
+                if(failureCount % 5 === 0) {
+                    this.logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
+                }
+            }
+        };
+
         this.html5Qrcode.start(
             { facingMode: "environment" },
             config,
-            async (decodedText, decodedResult) => {
-                try { await this.html5Qrcode.stop(); this.html5Qrcode.clear(); } catch(e){}
-                this.ui.scannerContainer.style.display = 'none';
-                this.logDiag('success', 'QR Code parameters identified! Extracting payload...');
-                
-                try {
-                    const decompressed = await ConnectionUtils.decompressData(decodedText);
-                    const data = JSON.parse(decompressed);
-                    ConnectionUtils.validatePayload(data);
-                    onSuccess(data);
-                } catch (e) {
-                    this.logDiag('error', `Failed Data Decompression: ${e.message}`);
-                    alert("Failed to decode connection data. Check diagnostics panel.");
-                    this.cleanupUI();
-                    this.startScanner(onSuccess);
-                }
-            },
-            (err) => {
-                if(err && !err.includes("NotFoundException")) {
-                    failureCount++;
-                    if(failureCount % 5 === 0) {
-                        this.logDiag('warn', `Scanner active, parsing frame... (Failed decoding x${failureCount})`);
-                    }
-                }
-            }
+            onScanSuccess,
+            onScanFailure
         ).catch(err => {
+            // Environment camera not found or failed (e.g. on laptops/desktops)
+            this.logDiag('warn', `Environment camera failed: ${err}. Attempting default webcam fallback...`);
+            return this.html5Qrcode.start(
+                {}, // empty lets browser select default camera
+                config,
+                onScanSuccess,
+                onScanFailure
+            );
+        }).catch(err => {
             this.logDiag('error', `Camera start failed: ${err}`);
             alert("Could not start camera. Ensure you have granted permissions and are using HTTPS.");
             this.cleanupUI();
@@ -630,8 +690,12 @@ export class P2PUIManager {
         if(this.ui.qrPlaceholder && this.ui.statusBadge.textContent !== 'CONNECTED') {
             this.ui.qrPlaceholder.style.display = 'block';
         }
-        if(this.html5Qrcode) { 
-            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(e){} 
+        if(this.html5Qrcode && this.html5Qrcode.isScanning) { 
+            try { 
+                this.html5Qrcode.stop().then(() => {
+                    try { this.html5Qrcode.clear(); } catch(_) {}
+                }).catch(() => {});
+            } catch(e){} 
         }
     }
 
@@ -642,8 +706,12 @@ export class P2PUIManager {
      */
     destroy() {
         // Stop camera / scanner if active
-        if (this.html5Qrcode) {
-            try { this.html5Qrcode.stop().then(() => this.html5Qrcode.clear()); } catch(_) {}
+        if (this.html5Qrcode && this.html5Qrcode.isScanning) {
+            try { 
+                this.html5Qrcode.stop().then(() => {
+                    try { this.html5Qrcode.clear(); } catch(_) {}
+                }).catch(() => {});
+            } catch(_) {}
             this.html5Qrcode = null;
         }
         // Close BroadcastChannel
