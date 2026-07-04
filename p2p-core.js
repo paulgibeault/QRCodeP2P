@@ -1,3 +1,5 @@
+import { SDPCodec } from './sdp-codec.js';
+
 const STUN_SERVERS = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
@@ -73,6 +75,40 @@ export class ConnectionUtils {
     }
 
     /**
+     * Encodes a signaling payload (JSON string or object) into the most
+     * compact transferable string available. Prefers binary template packing
+     * (see sdp-codec.js, ~130-180 chars); falls back to legacy deflate+base64url
+     * if the SDP has a shape the packer doesn't understand.
+     */
+    static async encodePayload(payload) {
+        const obj = typeof payload === 'string' ? JSON.parse(payload) : payload;
+        try {
+            return SDPCodec.pack(obj);
+        } catch (e) {
+            // Unexpected SDP shape — legacy deflate still works, just bigger.
+            return await ConnectionUtils.compressData(
+                typeof payload === 'string' ? payload : JSON.stringify(payload)
+            );
+        }
+    }
+
+    /**
+     * Decodes a transferable string back into a validated payload object.
+     * Accepts both the packed format ("1.<base64url>") and the legacy
+     * deflate+base64url format.
+     */
+    static async decodePayload(str) {
+        let obj;
+        if (SDPCodec.isPacked(str)) {
+            obj = SDPCodec.unpack(str);
+        } else {
+            const decompressed = await ConnectionUtils.decompressData(str);
+            obj = JSON.parse(decompressed);
+        }
+        return ConnectionUtils.validatePayload(obj);
+    }
+
+    /**
      * Validates that a signaling payload has the expected structure before
      * passing it to WebRTC internals. Throws a descriptive Error on failure.
      * @param {*} data - The deserialized payload object.
@@ -109,7 +145,12 @@ export class PeerManager extends EventTarget {
         this.options = {
             allowLocalCandidates: options.allowLocalCandidates !== false,
             allowIPv6Candidates: options.allowIPv6Candidates !== false,
-            connectionTimeoutMs: options.connectionTimeoutMs || 300000 // 5 minutes default
+            connectionTimeoutMs: options.connectionTimeoutMs || 300000, // 5 minutes default
+            // 'anywhere' = public STUN (no data/signaling transits it, it only
+            //              reflects your public IP; enables cross-network play).
+            // 'local'    = zero ICE servers; nothing external is ever contacted;
+            //              connections work on the same LAN only.
+            iceMode: options.iceMode === 'local' ? 'local' : 'anywhere'
         };
     }
 
@@ -125,7 +166,8 @@ export class PeerManager extends EventTarget {
             this.peers.delete(peerId);
         }
         
-        const peerConnection = new RTCPeerConnection(STUN_SERVERS);
+        const rtcConfig = this.options.iceMode === 'local' ? { iceServers: [] } : STUN_SERVERS;
+        const peerConnection = new RTCPeerConnection(rtcConfig);
         const peerData = {
             connection: peerConnection,
             dataChannel: null,
@@ -250,7 +292,8 @@ export class PeerManager extends EventTarget {
             const offer = await peerData.connection.createOffer();
             await peerData.connection.setLocalDescription(offer);
             await this.waitForIceGathering(peerId);
-            
+            this._warnIfNoCandidates(peerId);
+
             setTimeout(() => {
                 if (peerData.status !== 'connected') {
                     peerData.connection.close();
@@ -286,7 +329,8 @@ export class PeerManager extends EventTarget {
             const answer = await peerData.connection.createAnswer();
             await peerData.connection.setLocalDescription(answer);
             await this.waitForIceGathering(hostPeerId);
-            
+            this._warnIfNoCandidates(hostPeerId);
+
             const minifiedSDP = ConnectionUtils.minifySDP(peerData.connection.localDescription.sdp, this.options);
             
             return JSON.stringify({
@@ -321,6 +365,26 @@ export class PeerManager extends EventTarget {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'sys', msg: `Answer accepted from ${peerId}` }}));
         } catch(e) {
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'error', msg: `Accepting answer failed: ${e.message}` }}));
+        }
+    }
+
+    /**
+     * Safari/WebKit withholds host ICE candidates until the page holds a
+     * device-capture permission, and gathers nothing at all in 'local' mode
+     * (no STUN, no camera). Detect the empty-candidate case and tell the user
+     * why the connection cannot possibly succeed, instead of failing silently.
+     */
+    _warnIfNoCandidates(peerId) {
+        const peerData = this.peers.get(peerId);
+        if (!peerData || !peerData.connection.localDescription) return;
+        const count = (peerData.connection.localDescription.sdp.match(/a=candidate:/g) || []).length;
+        if (count === 0) {
+            this.dispatchEvent(new CustomEvent('diagnostic', {
+                detail: {
+                    type: 'warn',
+                    msg: 'No ICE candidates gathered! On Safari, "Same Wi-Fi only" mode requires camera permission — switch to "Anywhere" mode or use the QR scan flow.'
+                }
+            }));
         }
     }
 
