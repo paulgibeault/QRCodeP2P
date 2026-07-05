@@ -190,6 +190,54 @@ test('joiner must not report connected before host applies the answer', async ()
 
 // ---------------------------------------------------------------------------
 
+// REGRESSION: closing the modal mid-ceremony then reopening must never show
+// a dead-end (step bar visible, no choice buttons, no code, no way forward).
+// Reopening either resumes the in-progress code screen or resets to start.
+test('reopening the modal mid-ceremony resumes or resets — never dead-ends', async () => {
+    const page = await context.newPage();
+    page.on('pageerror', err => console.error('  [pageerror]', err.message));
+    await page.goto(`${BASE}/index.html`);
+    await page.waitForFunction('!!window.__mp');
+    await page.evaluate(() => { __mp.peerNode.options.iceMode = 'local'; });
+
+    // Start hosting, then bail: close the modal, reopen it.
+    await page.click('#btn-multiplayer');
+    await page.click('#p2p-btn-host');
+    await page.waitForFunction(`__mp.ui.rawSDPPayload.length > 0`, null, { timeout: 15000 });
+    await page.click('#p2p-btn-close');
+    await page.click('#btn-multiplayer');
+
+    // Must RESUME: code visible again with the next-step button.
+    const resumed = await page.evaluate(() => ({
+        qrVisible: document.getElementById('p2p-qr-container').style.display !== 'none' &&
+                   document.getElementById('p2p-work-area').style.display !== 'none',
+        scanBtnVisible: document.getElementById('p2p-btn-scan-ans').style.display !== 'none',
+        choiceHidden: document.getElementById('p2p-choice').style.display === 'none'
+    }));
+    assert.ok(resumed.qrVisible, 'reopen mid-host must resume the code screen');
+    assert.ok(resumed.scanBtnVisible, 'resume must offer the next step (scan theirs)');
+    assert.ok(resumed.choiceHidden, 'resume must not also show the choice screen');
+
+    // Start over must return to a clean first screen and drop pending peers.
+    await page.click('#p2p-btn-restart');
+    const fresh = await page.evaluate(() => ({
+        choiceVisible: document.getElementById('p2p-choice').style.display !== 'none',
+        hostVisible: document.getElementById('p2p-btn-host').style.display !== 'none',
+        qrHidden: document.getElementById('p2p-work-area').style.display === 'none',
+        stagesHidden: document.getElementById('p2p-stages').style.display === 'none',
+        pendingPeers: __mp.peerNode.peers.size
+    }));
+    assert.ok(fresh.choiceVisible && fresh.hostVisible, 'start over must show the choice screen');
+    assert.ok(fresh.qrHidden, 'start over must hide the old code');
+    assert.ok(fresh.stagesHidden, 'start over must clear the step bar');
+    assert.equal(fresh.pendingPeers, 0, 'start over must abandon pending attempts');
+
+    console.log('  ✓ bail + reopen resumes; Start over resets cleanly');
+    await page.close();
+});
+
+// ---------------------------------------------------------------------------
+
 test('backward compat: legacy deflate payloads still decode', async () => {
     const page = await newHarnessPage();
     const result = await page.evaluate(async () => {
