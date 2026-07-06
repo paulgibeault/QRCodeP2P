@@ -506,17 +506,21 @@ export class PeerManager extends EventTarget {
         }
 
         // Host relays APP messages between clients — each destination link
-        // gets its own reliability sequence. Control frames are never relayed.
+        // gets its own reliability sequence, and the relay marks the frame so
+        // receivers know it did NOT originate from their direct link partner
+        // (identity/fingerprint claims must never bind through a relay).
+        // The host always stamps relayed:true itself, so a sender cannot
+        // launder a relayed frame into looking direct.
         if (this.isHost && msg.from !== this.myId) {
             this.peers.forEach((destData, destId) => {
-                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: msg.from });
+                if (destId !== peerId) this._sendAppTo(destId, { text: msg.text, from: msg.from, relayed: true });
             });
         }
 
         // Destructure only the expected fields to avoid merging arbitrary keys
-        const { text, from } = msg;
+        const { text, from, relayed } = msg;
         this.dispatchEvent(new CustomEvent('message', {
-            detail: { text, from, incoming: true, peerId }
+            detail: { text, from, relayed: !!relayed, incoming: true, peerId }
         }));
     }
 
@@ -627,7 +631,9 @@ export class PeerManager extends EventTarget {
         if (!open && peerData.status !== 'interrupted') return false;
 
         const seq = ++peerData.outSeq;
-        const wire = JSON.stringify({ text: msg.text, from: msg.from, seq });
+        const wire = JSON.stringify(msg.relayed
+            ? { text: msg.text, from: msg.from, seq, relayed: true }
+            : { text: msg.text, from: msg.from, seq });
         peerData.outbox.push({ seq, wire });
         if (peerData.outbox.length > this.options.outboxLimit) {
             peerData.outbox.splice(0, peerData.outbox.length - this.options.outboxLimit);
