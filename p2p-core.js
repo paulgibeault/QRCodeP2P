@@ -706,6 +706,21 @@ export class PeerManager extends EventTarget {
         this.peers.forEach((peerData, pId) => {
             if (pId !== excludePeerId && this._sendAppTo(pId, msg)) sent = true;
         });
+        // Terminally-dead sessions awaiting adoption (rendezvous repair) keep
+        // accepting sends into their stashed outbox — the resync on the
+        // reconnected channel replays them, so a repair-in-progress loses
+        // nothing. Bounded by the same outbox cap.
+        this.sessionStash.forEach((stash, pId) => {
+            if (pId === excludePeerId) return;
+            const seq = ++stash.outSeq;
+            stash.outbox.push({ seq, wire: JSON.stringify(msg.relayed
+                ? { text: msg.text, from: msg.from, seq, relayed: true }
+                : { text: msg.text, from: msg.from, seq }) });
+            if (stash.outbox.length > this.options.outboxLimit) {
+                stash.outbox.splice(0, stash.outbox.length - this.options.outboxLimit);
+            }
+            sent = true;
+        });
         return sent;
     }
 

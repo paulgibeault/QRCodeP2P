@@ -155,6 +155,9 @@ applications.
 - On every channel open, each side sends `resync{have: lastInSeq}`; the
   peer prunes its outbox to `> have` and replays the rest in order.
 - Frames without `seq` (pre-v1.7 peers) are delivered without dedup.
+- A terminally-dead session sitting in the adoption stash (§5.5, §7.5)
+  still accepts sends into its stashed outbox, so traffic produced *during*
+  a rendezvous repair replays on the reconnected channel.
 
 Combined effect: SCTP retransmission covers in-connection loss; the
 outbox+resync covers *across-connection* loss; seq dedup collapses both to
