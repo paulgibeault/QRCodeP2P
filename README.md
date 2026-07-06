@@ -40,6 +40,9 @@ HOST TAB                        JOINER DEVICE
 - **Anywhere** (default): uses public STUN — no data or signaling ever transits it; it only reflects your public IP. Required for Safari joiners that never grant camera access (Safari withholds ICE candidates without device permission).
 - **Same Wi-Fi only**: zero external servers of any kind. Works LAN-only; on Safari this mode needs the QR flow (its camera grant unlocks host candidates).
 
+### Resilience (v1.7)
+A quick app switch or a notification no longer kills the session. Links ride out trouble in an `interrupted` state instead of dying: heartbeats detect a stalled peer, a wake probe re-checks the link the instant the tab returns, ICE restarts renegotiate **in-band over the data channel** (no new QR needed), and messages sent during a blip are queued and replayed with exactly-once delivery. Only after a generous grace window (default 5 min) does a link give up. See the v1.7.0 section of [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md).
+
 A stage tracker in the connection modal shows exactly which leg of the exchange succeeded or died, and **📋 Copy transcript** exports the diagnostics for remote debugging.
 
 Everything happens securely and locally after the initial exchange. See [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) for the wire format, the cross-browser test matrix, and known limits.
@@ -50,7 +53,7 @@ Everything happens securely and locally after the initial exchange. See [IMPLEME
 cd test
 npm install                              # Playwright library (uses your installed Chrome)
 npx playwright install firefox webkit    # for the cross-engine matrix
-npm test                                 # codec unit tests + 2-page/3-tab e2e
+npm test                                 # codec unit tests + 2-page/3-tab e2e + resilience suite
 node --test cross-engine.test.mjs        # chrome/firefox/webkit matrix
 ```
 

@@ -9,7 +9,7 @@
 <body>
 <div class="container">
     <header>
-        <h1>QR-Code P2P Connect <span style="font-size:0.5em; color:#888; vertical-align:middle; font-weight:normal; margin-left:10px;">v1.6.1</span></h1>
+        <h1>QR-Code P2P Connect <span style="font-size:0.5em; color:#888; vertical-align:middle; font-weight:normal; margin-left:10px;">v1.7.0</span></h1>
         <p>Establish a WebRTC connection with no signaling server!</p>
         <div id="connection-status" class="status-disconnected">Disconnected</div>
     </header>
@@ -78,6 +78,12 @@
             logMessage('Connected to peer!', 'system');
             document.getElementById('chat-input').disabled = false;
             document.getElementById('btn-send').disabled = false;
+        } else if (status === 'interrupted') {
+            // Session is alive and repairing itself — keep the composer
+            // enabled; outbound messages queue and replay on recovery.
+            statusBadge.textContent = 'RECONNECTING…';
+            statusBadge.classList.add('status-connecting');
+            logMessage('Connection interrupted — reconnecting…', 'system');
         } else if (status === 'disconnected') {
             statusBadge.classList.add('status-disconnected');
             document.getElementById('chat-input').disabled = true;

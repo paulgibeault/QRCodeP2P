@@ -235,3 +235,79 @@ real `connected` after it's applied.
 - PWA manifest (+ Android `share_target`) for the app re-entry story.
 - Lift into the arcade launcher as the `Arcade.peer` backbone
   (launcher owns the connection; games multiplex via postMessage).
+
+## Resilience layer (2026-07-06) — v1.7.0 "Survive the App Switch"
+
+Problem from the field: a phone getting a notification or a quick app switch
+suspends the tab; ICE consent lapses ~15s later; v1.6 treated every wobble as
+death (`failed` → close+delete, channel `onclose` → delete), and since
+signaling is a manual ceremony, "reconnect" meant redoing the whole QR dance.
+Design goal: a multiplayer session must survive suspends measured in minutes,
+with zero message loss for anything the apps sent meanwhile.
+
+### Link state machine (p2p-core.js)
+
+```
+new → checking → finalizing → connected ⇄ interrupted → disconnected (terminal)
+```
+
+`interrupted` = "session alive, path being repaired". Entered on ICE
+disconnected/failed (established links only), stale heartbeat, or a failed
+wake probe. Exited by ANY inbound frame (cheapest possible proof of life) or
+by `interruptedGraceMs` expiry (default 5 min — an idle RTCPeerConnection is
+cheap; UIs can offer `disconnectPeer()` for deliberate teardown). Mid-ceremony
+failures still fail fast — there is no session to preserve yet.
+
+### Repair machinery, in escalation order
+
+1. **ICE self-healing** — `disconnected` usually recovers by itself when the
+   suspended tab wakes and consent checks resume. v1.7's main trick is simply
+   NOT destroying state while that happens.
+2. **Heartbeat** — `{__p2pc:'ping'/'pong'}` control frames every 5s (default).
+   Detects a stalled peer faster than ICE, keeps NAT bindings warm, and the
+   returning pong is what flips `interrupted` back to `connected`. Skipped
+   while OUR tab is hidden — a backgrounded device must never judge its peers.
+3. **Wake probe** — `visibilitychange→visible` pings immediately; no answer in
+   3s marks the link interrupted instead of waiting for ICE to notice.
+4. **In-band ICE restart** — after the first ceremony the data channel IS the
+   signaling channel. `restartIce()` offers/answers/candidates travel as
+   `{__p2pc:'signal'}` frames using the perfect-negotiation pattern (JOINER =
+   polite). Frames queue in SCTP while the path is down and deliver the moment
+   it revives; glare (both sides restarting) settles automatically — proven by
+   a real two-browser e2e test. Honest scope note: a hard network change on
+   BOTH ends (or a fully dead channel) still needs a fresh ceremony — that's
+   the rendezvous follow-up (see RECONNECT_RENDEZVOUS.md).
+
+### Reliability layer (exactly-once across blips)
+
+App frames now carry a per-link `seq`; each link keeps an outbox of unacked
+frames (`{__p2pc:'ack', upTo}` prunes it). While interrupted, sends are
+QUEUED, not refused. On channel (re)open each side sends
+`{__p2pc:'resync', have: lastInSeq}` and the peer replays everything newer.
+Receivers drop `seq <= lastInSeq`, so replays and SCTP retransmits dedup to
+exactly-once app delivery. The host relays app messages between clients
+through each destination link's OWN sequence (never raw), and control frames
+are never relayed. Outbox is capped (default 1000) — overflow drops oldest
+with a diagnostic; high-rate games should resync their own state on recovery.
+Pre-v1.7 peers (no `seq`) still interop: their frames deliver without dedup.
+
+### Security invariants
+
+- Control frames are honored only from the DTLS-authenticated link they
+  arrived on and are never relayed by the host.
+- Apps cannot forge control frames: `send()/broadcast()` always wrap app
+  payloads under the `text` key, so `__p2pc` can never appear at the top level
+  of an app-originated frame.
+- `signal` payloads are shape-validated before touching any RTCPeerConnection
+  API; renegotiation grants a peer nothing new — it can only renegotiate the
+  one link it is already an authenticated endpoint of.
+- Nothing external is contacted that wasn't already (STUN in 'anywhere' mode).
+
+### Test results (2026-07-06, macOS, Chrome via Playwright)
+
+19/19: codec unit suite + v1.5/1.6 e2e regressions unchanged, plus 7 new
+resilience tests (`test/resilience.test.mjs`): control-frame invisibility,
+ack/outbox pruning, seq dedup, legacy interop, REAL in-band ICE restart with
+message flow after, REAL simultaneous-restart glare, grace-window state
+machine (expiry + recovery + mid-ceremony fail-fast), interrupted-queue →
+resync replay, and wake-probe behavior.
