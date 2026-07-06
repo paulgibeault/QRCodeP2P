@@ -1,4 +1,18 @@
-# Reconnect Rendezvous — design (follow-up to v1.7, NOT yet implemented)
+# Reconnect Rendezvous — design document
+
+> **STATUS: IMPLEMENTED in v1.9** — see `PROTOCOL.md` §7 for the normative
+> spec and `rendezvous.js` / `rendezvous-crypto.js` / `rendezvous-carriers.js`
+> for the implementation. Deviations from this design, chosen during
+> implementation: (1) the dependency-free carrier is minimal **MQTT 3.1.1
+> over WSS** — Nostr needs secp256k1 signing (a vendored dependency) and
+> remains a future carrier; (2) caller/listener roles derive from the
+> **pairing randoms** (lower hex = caller), not deviceIds, keeping the
+> transport app-agnostic; (3) pair labels are **local to each side**
+> (correlation is by link); (4) the caller uses a **shadow connection** so
+> the v1.7 in-band repair keeps first claim on the link, and adoption
+> (`PeerManager.adoptConnection`) resumes the session from the live entry
+> or the terminal-death stash. The rest of this document matches what
+> shipped.
 
 v1.7's resilience layer heals every disruption that leaves the data channel
 recoverable: suspends, blips, single-ended network changes. What it cannot

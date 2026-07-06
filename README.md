@@ -40,6 +40,9 @@ HOST TAB                        JOINER DEVICE
 - **Anywhere** (default): uses public STUN — no data or signaling ever transits it; it only reflects your public IP. Required for Safari joiners that never grant camera access (Safari withholds ICE candidates without device permission).
 - **Same Wi-Fi only**: zero external servers of any kind. Works LAN-only; on Safari this mode needs the QR flow (its camera grant unlocks host candidates).
 
+### Automatic reconnection (v1.9)
+Devices that pair once can opt in to **zero-touch reconnection**: if the connection dies completely (both networks changed, browser killed), they find each other again through public dead-drop relays — everything published is end-to-end AEAD-sealed with keys born on the original QR-ceremonied channel, topics are unlinkable daily HMACs, epochs kill replays, and the keys ratchet on every successful reconnect. A reconnected session **resumes** (sequence numbers, queued messages) rather than restarting. Full spec: [PROTOCOL.md](PROTOCOL.md).
+
 ### Resilience (v1.7)
 A quick app switch or a notification no longer kills the session. Links ride out trouble in an `interrupted` state instead of dying: heartbeats detect a stalled peer, a wake probe re-checks the link the instant the tab returns, ICE restarts renegotiate **in-band over the data channel** (no new QR needed), and messages sent during a blip are queued and replayed with exactly-once delivery. Only after a generous grace window (default 5 min) does a link give up. See the v1.7.0 section of [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md).
 

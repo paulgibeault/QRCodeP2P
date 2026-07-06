@@ -354,3 +354,39 @@ automates the other device's half when the invite travels as a link.
 across managers AND page reloads (IndexedDB), opt-out yields a distinct
 ephemeral identity, `getPeerFingerprint` matches the true remote fingerprint
 on a live link.
+
+## Rendezvous — the humans are optional now (2026-07-06) — v1.9.0
+
+RECONNECT_RENDEZVOUS.md implemented, plus PROTOCOL.md — the formal spec of
+the whole stack (payload codec → ceremonies → link protocol → identity →
+rendezvous). Highlights and implementation decisions:
+
+- **Core:** `adoptConnection(peerId, pc, channel)` installs an externally
+  negotiated connection under an existing session, inheriting seq counters
+  and outbox from the live entry or the new terminal-death session stash
+  (bounded LRU of 8). `sendExt`/`control-ext` add a namespaced extension
+  lane to the control channel.
+- **Crypto** (`rendezvous-crypto.js`): HKDF key tree from two 32-byte
+  pairing randoms exchanged over the DTLS channel; daily HMAC topics;
+  AES-256-GCM sealing with direction+epoch AAD; per-reconnect ratchet
+  bound to the new connection's fingerprint transcript. Non-extractable
+  CryptoKeys in IndexedDB.
+- **Roles from randoms**, not deviceIds (lower hex = caller): the transport
+  stays app-agnostic. Pair labels are local per side; pairing correlates
+  by link.
+- **Shadow connections:** the caller prepares its reconnect offer on a
+  side connection so v1.7's in-band repair keeps first claim on a link
+  that's merely interrupted; adoption happens only when a sealed answer
+  arrives. An in-band recovery that wins the race settles the episode
+  WITHOUT ratcheting (lockstep rule).
+- **Carriers:** minimal dependency-free MQTT 3.1.1 over WSS (public
+  brokers) + BroadcastChannel loopback for tests. Nostr deferred
+  (secp256k1 = vendored dep).
+- **Tests (27/27):** all prior suites unchanged, plus crypto property
+  tests, MQTT framing (split-packet reassembly), and the LIFECYCLE e2e:
+  two isolated browser contexts (separate IDB/certs, like real devices)
+  pair once, hard-kill the channel → auto-reconnect through an in-test
+  dead-drop server, exactly-once delivery across the death, epoch 0→1;
+  then close both pages entirely, fresh pages + resumeAll() → reconnect
+  again with zero interaction, epoch 1→2. Plus forged/replayed blob
+  rejection at the AEAD boundary.

@@ -6,9 +6,17 @@
 <script type="module">
     import { PeerManager, ConnectionUtils } from '../p2p-core.js';
     import { SDPCodec } from '../sdp-codec.js';
+    import { RendezvousCrypto } from '../rendezvous-crypto.js';
+    import { RendezvousManager } from '../rendezvous.js';
+    import { LoopbackCarrier, MqttCarrier, mqttCodec } from '../rendezvous-carriers.js';
     window.PeerManager = PeerManager;
     window.ConnectionUtils = ConnectionUtils;
     window.SDPCodec = SDPCodec;
+    window.RendezvousCrypto = RendezvousCrypto;
+    window.RendezvousManager = RendezvousManager;
+    window.LoopbackCarrier = LoopbackCarrier;
+    window.MqttCarrier = MqttCarrier;
+    window.mqttCodec = mqttCodec;
     window.__ready = true;
 </script>
 </body>

@@ -7,7 +7,8 @@
     "test:e2e": "node --test e2e.test.mjs",
     "test:resilience": "node --test resilience.test.mjs",
     "test:identity": "node --test identity.test.mjs",
-    "test": "node --test codec.test.mjs e2e.test.mjs resilience.test.mjs identity.test.mjs"
+    "test:rendezvous": "node --test rendezvous.test.mjs",
+    "test": "node --test codec.test.mjs e2e.test.mjs resilience.test.mjs identity.test.mjs rendezvous.test.mjs"
   },
   "devDependencies": {
     "playwright": "^1.49.0"
