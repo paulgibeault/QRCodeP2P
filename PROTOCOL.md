@@ -154,6 +154,12 @@ applications.
   and are acked immediately.
 - On every channel open, each side sends `resync{have: lastInSeq}`; the
   peer prunes its outbox to `> have` and replays the rest in order.
+- **Ordering gate:** after a channel opens, a sender MUST NOT transmit new
+  app frames until it has processed the peer's `resync` (new frames queue in
+  the outbox meanwhile; a bounded fallback timer covers pre-v1.7 peers that
+  never send one). A fresh frame overtaking the replay would advance the
+  receiver's cumulative dedup counter past the gap, causing the replayed
+  frames to be dropped as duplicates.
 - Frames without `seq` (pre-v1.7 peers) are delivered without dedup.
 - A terminally-dead session sitting in the adoption stash (§5.5, §7.5)
   still accepts sends into its stashed outbox, so traffic produced *during*

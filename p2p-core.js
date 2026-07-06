@@ -383,6 +383,8 @@ export class PeerManager extends EventTarget {
             lastInSeq: 0,              // last app seq we delivered from this link
             outbox: [],                // unacked {seq, wire} awaiting replay
             outboxOverflowed: false,
+            resyncFlushed: false,      // sends transmit only after the peer's resync is processed
+            resyncTimer: null,
             heartbeatTimer: null,
             graceTimer: null,
             restartTimer: null,
@@ -498,7 +500,13 @@ export class PeerManager extends EventTarget {
             this._startHeartbeat(peerId);
             // Tell the peer the last app seq we delivered so it can replay
             // anything we missed while the link was down (no-op on first open).
+            // Until THEIR resync arrives, our new sends only queue — a fresh
+            // frame transmitted ahead of the replay would advance the peer's
+            // cumulative dedup counter past the gap and the replayed frames
+            // would be dropped as duplicates. Strict per-link order or nothing.
+            peerData.resyncFlushed = false;
             this._sendControl(peerId, { __p2pc: 'resync', have: peerData.lastInSeq });
+            peerData.resyncTimer = setTimeout(() => this._flushOutbox(peerId), 2500); // pre-v1.7 peers never send one
             this._markConnected(peerId);
             this.dispatchEvent(new CustomEvent('chatState', { detail: { peerId, ready: true } }));
             this.dispatchEvent(new CustomEvent('diagnostic', { detail: { type: 'success', msg: `Data channel OPEN with ${peerId}!` }}));
@@ -578,14 +586,7 @@ export class PeerManager extends EventTarget {
             case 'resync': {
                 if (typeof msg.have !== 'number') break;
                 peerData.outbox = peerData.outbox.filter(e => e.seq > msg.have);
-                if (peerData.outbox.length && peerData.dataChannel && peerData.dataChannel.readyState === 'open') {
-                    this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
-                        type: 'sys', msg: `Replaying ${peerData.outbox.length} buffered message(s) to ${peerId}.`
-                    }}));
-                    for (const entry of peerData.outbox) {
-                        try { peerData.dataChannel.send(entry.wire); } catch(e) { break; }
-                    }
-                }
+                this._flushOutbox(peerId);
                 break;
             }
             case 'signal':
@@ -689,10 +690,33 @@ export class PeerManager extends EventTarget {
                 }}));
             }
         }
-        if (open) {
+        if (open && peerData.resyncFlushed) {
             try { peerData.dataChannel.send(wire); } catch(e) { /* stays queued for resync */ }
         }
+        // Not yet flushed: the frame waits in the outbox so the post-resync
+        // flush transmits everything in strict seq order.
         return true;
+    }
+
+    /**
+     * Transmits the (pruned) outbox in seq order and opens the gate for
+     * immediate sends. Runs when the peer's resync arrives, or after a grace
+     * for pre-v1.7 peers that will never send one.
+     */
+    _flushOutbox(peerId) {
+        const peerData = this.peers.get(peerId);
+        if (!peerData) return;
+        if (peerData.resyncTimer) { clearTimeout(peerData.resyncTimer); peerData.resyncTimer = null; }
+        peerData.resyncFlushed = true;
+        if (!peerData.dataChannel || peerData.dataChannel.readyState !== 'open') return;
+        if (peerData.outbox.length) {
+            this.dispatchEvent(new CustomEvent('diagnostic', { detail: {
+                type: 'sys', msg: `Replaying ${peerData.outbox.length} buffered message(s) to ${peerId}.`
+            }}));
+            for (const entry of peerData.outbox) {
+                try { peerData.dataChannel.send(entry.wire); } catch(e) { break; }
+            }
+        }
     }
 
     broadcast(message, excludePeerId = null) {
@@ -872,6 +896,7 @@ export class PeerManager extends EventTarget {
     _clearPeerTimers(peerData) {
         this._clearRecoveryTimers(peerData);
         if (peerData.heartbeatTimer) { clearInterval(peerData.heartbeatTimer); peerData.heartbeatTimer = null; }
+        if (peerData.resyncTimer) { clearTimeout(peerData.resyncTimer); peerData.resyncTimer = null; }
     }
 
     _teardownPeer(peerId, finalStatus) {
