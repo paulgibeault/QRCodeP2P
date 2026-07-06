@@ -311,3 +311,46 @@ ack/outbox pruning, seq dedup, legacy interop, REAL in-band ICE restart with
 message flow after, REAL simultaneous-restart glare, grace-window state
 machine (expiry + recovery + mid-ceremony fail-fast), interrupted-queue →
 resync replay, and wake-probe behavior.
+
+## Persistent identity + one-tap reconnect entry (2026-07-06) — v1.8.0
+
+Question from the field: "can both sides just REPLAY the last connection
+attempt?" No — and its impossibility is a feature. ICE credentials are
+one-time by design (no JS API to set/reuse ufrag/pwd), candidates point at
+dead sockets/NAT bindings, and default DTLS certs are per-connection. If
+replay worked, every old QR/link would be a durable credential — anyone who
+ever saw one could rejoin. What v1.8 ships instead:
+
+### Persistent device certificate (p2p-core.js)
+
+`RTCPeerConnection.generateCertificate({name:'ECDSA', namedCurve:'P-256'})`,
+stored in IndexedDB (`qrp2p-identity`), passed via `certificates:[cert]` to
+every connection. The device's DTLS fingerprint is now STABLE across page
+loads. Enabled by default; `persistentIdentity: false` opts out; storage
+failure (private browsing) falls back to ephemeral with a diagnostic.
+`PeerManager.getPeerFingerprint(peerId)` exposes the REMOTE identity of a
+link; `PeerManager.extractFingerprint(sdp)` is the underlying static.
+
+HONESTY NOTE: browsers cap certificate lifetime (~30 days) and we regenerate
+just before expiry, so fingerprints rotate on that cadence. Downstream
+pinning must therefore be TOFU-with-change-notice on manual ceremonies (the
+in-person QR exchange is the actual root of trust), NOT a silent hard-fail.
+Durable cryptographic pair-binding arrives with the rendezvous pair secret
+(RECONNECT_RENDEZVOUS.md) — the stable-within-a-month fingerprint is what
+makes short payloads and change *detection* possible today.
+
+### One-tap host entry (p2p-ui.js / p2p-addon.js)
+
+`showUI({mode:'host'})` skips the Host/Join choice screen and puts a FRESH
+invite code on screen immediately (auto-selects the add-player wording when a
+session is already live). This is the transport half of the launcher's
+"Reconnect" button on known peers: reconnecting is still one fresh exchange
+(physics), but now it's one tap to produce it, and link-tennis already
+automates the other device's half when the invite travels as a link.
+
+### Test results (2026-07-06)
+
+22/22 — all v1.7 suites unchanged, plus identity.test.mjs: fingerprint stable
+across managers AND page reloads (IndexedDB), opt-out yields a distinct
+ephemeral identity, `getPeerFingerprint` matches the true remote fingerprint
+on a live link.
